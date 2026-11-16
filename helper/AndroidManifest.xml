@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.extbridge.helper"
+    android:versionCode="4"
+    android:versionName="4.0.0-root">
+
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+
+    <application
+        android:allowBackup="false"
+        android:extractNativeLibs="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:label="ExtBridge"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+        <!-- LSPosed：同一个 APK 也可作为系统框架模块使用 -->
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="ExtBridge 系统框架模式：把扩展桌面/驱动采集注入 system_server，无需每次 root 拉起" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="93" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="ExtBridge"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.extbridge.helper.tablet"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".TouchpadActivity"
+            android:exported="true"
+            android:label="ExtBridge 触摸板"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.extbridge.helper.tablet"
+            android:windowSoftInputMode="adjustResize|stateHidden"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden" />
+
+        <activity
+            android:name=".LauncherActivity"
+            android:exported="true"
+            android:label="ExtBridge 桌面"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.extbridge.helper.extdesktop"
+            android:resizeableActivity="true"
+            android:windowSoftInputMode="stateAlwaysHidden|adjustNothing"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density" />
+
+        <service
+            android:name=".BridgeService"
+            android:exported="true"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="External display overlay controller and cursor presenter" />
+        </service>
+
+        <service
+            android:name=".NavAssistService"
+            android:exported="true"
+            android:label="ExtBridge 平板辅助手势"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/nav_assist_config" />
+        </service>
+
+        <receiver
+            android:name=".ControlReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.extbridge.helper.TOGGLE_INPUT" />
+                <action android:name="com.extbridge.helper.STATE_SYNC" />
+                <action android:name="com.extbridge.helper.REBUILD" />
+                <action android:name="com.extbridge.helper.LAUNCH_EXT_HOME" />
+                <action android:name="com.extbridge.helper.TOGGLE_MIRROR" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".AdbPairingReceiver"
+            android:exported="false" />
+
+        <provider
+            android:name=".BridgeProvider"
+            android:authorities="com.extbridge.helper.provider"
+            android:exported="true" />
+    </application>
+</manifest>
