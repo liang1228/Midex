@@ -8,13 +8,12 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Rect;
-import android.graphics.RenderEffect;
-import android.graphics.Shader;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
@@ -22,6 +21,7 @@ import android.graphics.drawable.StateListDrawable;
 import android.icu.text.Transliterator;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.text.Editable;
 import android.text.TextUtils;
 import android.text.TextWatcher;
@@ -50,18 +50,38 @@ import java.util.Locale;
 import java.util.Map;
 
 public class LauncherActivity extends Activity {
+    private static final int REQUEST_NEARBY_DEVICES = 71;
+    private static LauncherActivity sPermissionHost;
+
+    static boolean requestNearbyDevices() {
+        LauncherActivity host = sPermissionHost;
+        if (host == null || host.isFinishing()) return false;
+        host.requestPermissions(BluetoothDiscovery.PERMISSIONS, REQUEST_NEARBY_DEVICES);
+        return true;
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == REQUEST_NEARBY_DEVICES) BridgeService.onNearbyDevicesPermissionResult();
+    }
     private static class AppEntry {
         String label;
         String pkg;
         String cls;
         String searchBlob;
         Drawable icon;
+        boolean portrait;
     }
 
     private final List<AppEntry> mAllApps = new ArrayList<>();
     private final List<AppEntry> mApps = new ArrayList<>();
     private FrameLayout mRoot;
     private FrameLayout mOverlayHost;
+    private FrameLayout mDrawer;
+    private LinearLayout mShortcuts;
+    private DesktopTaskbar mLocalTaskbar;
+    private boolean mDrawerOpen;
     private ImageView mWallpaperView;
     private LinearLayout mContent;
     private EditText mSearchInput;
@@ -108,6 +128,7 @@ public class LauncherActivity extends Activity {
             registerReceiver(mSyncRx, new IntentFilter("com.extbridge.helper.STATE_SYNC"), RECEIVER_EXPORTED);
         } catch (Throwable ignored) {}
         loadAppsAsync();
+        if (getIntent().getBooleanExtra("showApps", false)) setDrawerOpen(true, getIntent().getBooleanExtra("search", false));
         loadWallpaperAsync(false);
         BridgeClient.setOnBinderReady(() -> runOnUiThread(() -> {
             refreshHeader();
@@ -118,13 +139,16 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onStart() {
         super.onStart();
+        sPermissionHost = this;
         BridgeService.setDockHidden(false);
-        BridgeService.setLauncherOverlayHost(mOverlayHost, getDisplay() != null ? getDisplay().getDisplayId() : -1);
+        BridgeService.setLauncherOverlayHost(mOverlayHost);
     }
 
     @Override
     protected void onStop() {
+        if (sPermissionHost == this) sPermissionHost = null;
         BridgeService.clearLauncherOverlayHost(mOverlayHost);
+        UiMotion.drawer(mDrawer, mContent, mDrawerOpen, false, this::clearSearch);
         super.onStop();
     }
 
@@ -148,6 +172,11 @@ public class LauncherActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         extractBinder(intent);
+        BridgeService.setLauncherOverlayHost(mOverlayHost);
+        BridgeService.refreshFromReceiver(this);
+        if (intent.getBooleanExtra("showApps", false)) setDrawerOpen(true, intent.getBooleanExtra("search", false));
+        else setDrawerOpen(false, false);
+        if (intent.getBooleanExtra("showRecents", false)) showRecentTasks();
     }
 
     private void extractBinder(Intent i) {
@@ -181,8 +210,8 @@ public class LauncherActivity extends Activity {
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (keyCode == KeyEvent.KEYCODE_ESCAPE && !mQuery.isEmpty()) {
-            clearSearch();
+        if (keyCode == KeyEvent.KEYCODE_ESCAPE && mDrawerOpen) {
+            setDrawerOpen(false, false, false);
             return true;
         }
         if (mSearchInput != null && !mSearchInput.hasFocus()) {
@@ -190,11 +219,12 @@ public class LauncherActivity extends Activity {
             boolean isCtrlF = (keyCode == KeyEvent.KEYCODE_F && event != null && event.isCtrlPressed());
             int ch = event != null ? event.getUnicodeChar() : 0;
             if (isSlash || isCtrlF) {
-                mSearchInput.requestFocus();
+                setDrawerOpen(true, true, false);
                 return true;
             }
             if (ch >= 0x20 && !Character.isISOControl(ch) && (ch < 0xE000)) {
-                mSearchInput.requestFocus();
+                if (event != null && (event.isCtrlPressed() || event.isAltPressed() || event.isMetaPressed())) return super.onKeyDown(keyCode, event);
+                setDrawerOpen(true, true, false);
                 mSearchInput.append(String.valueOf((char) ch));
                 return true;
             }
@@ -203,214 +233,269 @@ public class LauncherActivity extends Activity {
     }
 
     private void buildUi() {
+        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
         mRoot = new FrameLayout(this);
-        mRoot.setFocusable(true);
+        mRoot.setBackground(new DesktopStyle.Wallpaper());
         mRoot.setFocusableInTouchMode(true);
-        mRoot.setBackground(new GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                new int[]{0xFF0B1120, 0xFF16213E, 0xFF0F172A}));
-
-        // Layer 1: Original device wallpaper with GPU frosted-glass blur
         mWallpaperView = new ImageView(this);
         mWallpaperView.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        mWallpaperView.setScaleX(1.08f);
-        mWallpaperView.setScaleY(1.08f);
-        if (Build.VERSION.SDK_INT >= 31) {
-            mWallpaperView.setRenderEffect(RenderEffect.createBlurEffect(28f, 28f, Shader.TileMode.CLAMP));
-        }
-        mRoot.addView(mWallpaperView, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        mRoot.addView(mWallpaperView, new FrameLayout.LayoutParams(-1, -1));
 
-        // Layer 2: Soft frosted dark scrim so icons & text remain high contrast on bright wallpapers
-        View scrim = new View(this);
-        scrim.setBackground(new GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0x480A101D, 0x5E0B1120, 0x78070B14}));
-        mRoot.addView(scrim, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        mShortcuts = new LinearLayout(this);
+        mShortcuts.setOrientation(LinearLayout.VERTICAL);
+        mShortcuts.setPadding(dp(18), dp(20), 0, 0);
+        android.widget.ScrollView shortcutsScroll = new android.widget.ScrollView(this);
+        shortcutsScroll.setVerticalScrollBarEnabled(false);
+        shortcutsScroll.addView(mShortcuts);
+        FrameLayout.LayoutParams shortcutsLp = new FrameLayout.LayoutParams(dp(124), -1, Gravity.TOP | Gravity.LEFT);
+        shortcutsLp.bottomMargin = dp(64);
+        mRoot.addView(shortcutsScroll, shortcutsLp);
+        mRoot.setOnClickListener(v -> setDrawerOpen(false, false));
+        mRoot.setOnLongClickListener(v -> { showDesktopMenu(v); return true; });
 
-        // Layer 3: Foreground desktop layout
+        mDrawer = new FrameLayout(this);
+        mDrawer.setBackgroundColor(0x35030A17);
+        mDrawer.setVisibility(View.GONE);
+        mDrawer.setOnClickListener(v -> setDrawerOpen(false, false));
+        mRoot.addView(mDrawer, new FrameLayout.LayoutParams(-1, -1));
         mContent = new LinearLayout(this);
         mContent.setOrientation(LinearLayout.VERTICAL);
-        mContent.setPadding(dp(26), dp(14), dp(26), dp(62));
-        mContent.setFocusable(true);
-        mContent.setFocusableInTouchMode(true);
+        mContent.setPadding(dp(30), dp(23), dp(30), dp(22));
+        mContent.setBackground(DesktopStyle.surface(this, 0xF024344D, 22));
+        mContent.setElevation(dp(22));
+        mContent.setOnClickListener(v -> {});
+        FrameLayout.LayoutParams drawerLp = new FrameLayout.LayoutParams(dp(860), dp(580), Gravity.CENTER);
+        drawerLp.bottomMargin = dp(44);
+        mDrawer.addView(mContent, drawerLp);
 
-        // Top Bar
-        LinearLayout top = new LinearLayout(this);
-        top.setOrientation(LinearLayout.HORIZONTAL);
-        top.setGravity(Gravity.CENTER_VERTICAL);
-        top.setPadding(dp(4), 0, dp(4), dp(12));
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView title = desktopText("应用", 21, Color.WHITE);
+        title.setTypeface(android.graphics.Typeface.create("sans-serif-medium", 0));
+        titleRow.addView(title, new LinearLayout.LayoutParams(0, dp(38), 1));
+        TextView close = DesktopStyle.button(this, "close", "关闭应用抽屉");
+        close.setOnClickListener(v -> setDrawerOpen(false, false));
+        titleRow.addView(close, new LinearLayout.LayoutParams(dp(38), dp(38)));
+        mContent.addView(titleRow);
+        mHeaderInfo = desktopText("", 11, DesktopStyle.MUTED);
+        LinearLayout.LayoutParams infoLp = new LinearLayout.LayoutParams(-1, dp(24));
+        infoLp.bottomMargin = dp(14);
+        mContent.addView(mHeaderInfo, infoLp);
 
-        TextView title = new TextView(this);
-        title.setText("ExtBridge 扩展桌面");
-        title.setTextColor(Color.WHITE);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 15f);
-        title.getPaint().setFakeBoldText(true);
-        title.setShadowLayer(dpF(4f), 0f, dpF(1.5f), 0xAA000000);
-        LinearLayout.LayoutParams tLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        tLp.rightMargin = dp(16);
-        top.addView(title, tLp);
-
-        // Frosted glass Search box container
-        LinearLayout searchBox = new LinearLayout(this);
-        searchBox.setOrientation(LinearLayout.HORIZONTAL);
-        searchBox.setGravity(Gravity.CENTER_VERTICAL);
-        searchBox.setPadding(dp(11), dp(4), dp(9), dp(4));
-        GradientDrawable sbBg = new GradientDrawable();
-        sbBg.setColor(0x66121A2A);
-        sbBg.setCornerRadius(dpF(16f));
-        sbBg.setStroke(1, 0x48FFFFFF);
-        searchBox.setBackground(sbBg);
-
-        TextView searchIcon = new TextView(this);
-        searchIcon.setText("🔍");
-        searchIcon.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 12.5f);
-        searchIcon.setPadding(0, 0, dp(6), 0);
-        searchBox.addView(searchIcon);
-
+        LinearLayout search = new LinearLayout(this);
+        search.setGravity(Gravity.CENTER_VERTICAL);
+        search.setPadding(dp(13), 0, dp(8), 0);
+        search.setBackground(DesktopStyle.surface(this, 0x40202A3E, 12));
+        ImageView searchIcon = new ImageView(this);
+        searchIcon.setImageDrawable(new DesktopStyle.Glyph("search", DesktopStyle.MUTED));
+        search.addView(searchIcon, new LinearLayout.LayoutParams(dp(18), dp(18)));
         mSearchInput = new EditText(this);
-        mSearchInput.setHint("搜索应用名 / 拼音首字母 / 包名 (回车打开)");
-        mSearchInput.setHintTextColor(0xFFAAB8CC);
-        mSearchInput.setTextColor(Color.WHITE);
-        mSearchInput.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 12.5f);
         mSearchInput.setSingleLine(true);
+        mSearchInput.setTextColor(Color.WHITE);
+        mSearchInput.setHintTextColor(DesktopStyle.MUTED);
+        mSearchInput.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 13);
+        mSearchInput.setHint("搜索应用");
         mSearchInput.setBackgroundColor(Color.TRANSPARENT);
-        mSearchInput.setPadding(dp(2), dp(3), dp(6), dp(3));
+        mSearchInput.setPadding(dp(12), 0, dp(6), 0);
         mSearchInput.setImeOptions(EditorInfo.IME_ACTION_GO | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
         mSearchInput.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
-            @Override public void afterTextChanged(Editable s) {
-                applyFilter(s == null ? "" : s.toString());
-            }
+            @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence value, int start, int before, int count) {}
+            @Override public void afterTextChanged(Editable value) { applyFilter(value.toString()); }
         });
-        mSearchInput.setOnEditorActionListener((v, actionId, ev) -> {
-            if (actionId == EditorInfo.IME_ACTION_GO || actionId == EditorInfo.IME_ACTION_SEARCH
-                    || actionId == EditorInfo.IME_ACTION_DONE
-                    || (ev != null && ev.getKeyCode() == KeyEvent.KEYCODE_ENTER && ev.getAction() == KeyEvent.ACTION_UP)) {
-                if (!mApps.isEmpty()) {
-                    launchApp(mApps.get(0));
-                }
+        mSearchInput.setOnEditorActionListener((v, action, event) -> {
+            if (action == EditorInfo.IME_ACTION_GO || (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                    && event.getAction() == KeyEvent.ACTION_UP)) {
+                if (!mApps.isEmpty()) launchApp(mApps.get(0));
                 return true;
             }
             return false;
         });
-        searchBox.addView(mSearchInput, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        mBtnClear = new TextView(this);
-        mBtnClear.setText("✕");
-        mBtnClear.setTextColor(0xFFCBD5E1);
-        mBtnClear.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 12.5f);
-        mBtnClear.setPadding(dp(8), dp(2), dp(8), dp(2));
-        mBtnClear.setVisibility(View.GONE);
+        search.addView(mSearchInput, new LinearLayout.LayoutParams(0, dp(44), 1));
+        mBtnClear = DesktopStyle.button(this, "close", "清除搜索");
         mBtnClear.setOnClickListener(v -> clearSearch());
-        searchBox.addView(mBtnClear);
+        mBtnClear.setVisibility(View.GONE);
+        search.addView(mBtnClear, new LinearLayout.LayoutParams(dp(36), dp(40)));
+        mContent.addView(search, new LinearLayout.LayoutParams(-1, dp(44)));
 
-        LinearLayout.LayoutParams sbLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        sbLp.rightMargin = dp(12);
-        top.addView(searchBox, sbLp);
-
-        TextView btnModeTip = new TextView(this);
-        btnModeTip.setText("🧩 显示模式");
-        btnModeTip.setTextColor(0xFFBAE6FD);
-        btnModeTip.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 11.5f);
-        btnModeTip.setPadding(dp(11), dp(5), dp(11), dp(5));
-        GradientDrawable mtBg = new GradientDrawable();
-        mtBg.setColor(0x550C4A6E);
-        mtBg.setCornerRadius(dpF(15f));
-        mtBg.setStroke(1, 0x5538BDF8);
-        btnModeTip.setBackground(mtBg);
-        btnModeTip.setOnClickListener(v -> showAllAppModesPicker());
-        LinearLayout.LayoutParams mtLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        mtLp.rightMargin = dp(8);
-        top.addView(btnModeTip, mtLp);
-
-        TextView btnWpRefresh = new TextView(this);
-        btnWpRefresh.setText("🖼 同步壁纸");
-        btnWpRefresh.setTextColor(0xFFE2E8F0);
-        btnWpRefresh.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 11.5f);
-        btnWpRefresh.setPadding(dp(11), dp(5), dp(11), dp(5));
-        GradientDrawable wpBg = new GradientDrawable();
-        wpBg.setColor(0x55121A2A);
-        wpBg.setCornerRadius(dpF(15f));
-        wpBg.setStroke(1, 0x3AFFFFFF);
-        btnWpRefresh.setBackground(wpBg);
-        btnWpRefresh.setOnClickListener(v -> {
-            loadWallpaperAsync(true);
-            Toast.makeText(this, "正在同步平板原机壁纸...", Toast.LENGTH_SHORT).show();
-        });
-        LinearLayout.LayoutParams wpLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        wpLp.rightMargin = dp(10);
-        top.addView(btnWpRefresh, wpLp);
-
-        mHeaderInfo = new TextView(this);
-        mHeaderInfo.setTextColor(0xFFE0F2FE);
-        mHeaderInfo.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 11.5f);
-        mHeaderInfo.setPadding(dp(11), dp(5), dp(11), dp(5));
-        GradientDrawable chipBg = new GradientDrawable();
-        chipBg.setColor(0x55121A2A);
-        chipBg.setCornerRadius(dpF(15f));
-        chipBg.setStroke(1, 0x3AFFFFFF);
-        mHeaderInfo.setBackground(chipBg);
-        top.addView(mHeaderInfo);
-
-        mContent.addView(top);
-
-        mTvEmpty = new TextView(this);
-        mTvEmpty.setText("未找到匹配的应用，可尝试输入中文、拼音首字母或英文包名");
-        mTvEmpty.setTextColor(0xFFE2E8F0);
-        mTvEmpty.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 13.5f);
-        mTvEmpty.setShadowLayer(dpF(3f), 0f, dpF(1.2f), 0xCC000000);
+        mTvEmpty = desktopText("没有找到应用", 14, DesktopStyle.MUTED);
         mTvEmpty.setGravity(Gravity.CENTER);
         mTvEmpty.setVisibility(View.GONE);
-        mContent.addView(mTvEmpty, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-
+        mContent.addView(mTvEmpty, new LinearLayout.LayoutParams(-1, 0, 1));
         mGrid = new GridView(this);
+        mGrid.setPadding(0, dp(24), 0, 0);
         mGrid.setVerticalSpacing(dp(12));
-        mGrid.setHorizontalSpacing(dp(8));
+        mGrid.setHorizontalSpacing(dp(12));
         mGrid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
         mGrid.setSelector(new ColorDrawable(Color.TRANSPARENT));
-        mGrid.setClipToPadding(false);
         mAdapter = new AppAdapter();
         mGrid.setAdapter(mAdapter);
-        mGrid.setOnItemClickListener((parent, view, position, id) -> {
-            if (position >= 0 && position < mApps.size()) {
-                launchApp(mApps.get(position));
-            }
-        });
+        mGrid.setOnItemClickListener((parent, view, position, id) -> launchApp(mApps.get(position)));
         mGrid.setOnItemLongClickListener((parent, view, position, id) -> {
-            if (position >= 0 && position < mApps.size()) {
-                showAppModeDialog(mApps.get(position));
-                return true;
-            }
-            return false;
+            showAppContext(mApps.get(position), view); return true;
         });
-        mContent.addView(mGrid, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        mContent.addView(mGrid, new LinearLayout.LayoutParams(-1, 0, 1));
+        TextView hint = desktopText("右键应用查看更多选项", 11, DesktopStyle.MUTED);
+        hint.setGravity(Gravity.CENTER);
+        mContent.addView(hint, new LinearLayout.LayoutParams(-1, dp(25)));
 
-        mRoot.addView(mContent, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        // Layer 4: In-Activity host for Dock / Flyout / Cursor in Scheme A (immune to global Settings overlay hiding)
+        mLocalTaskbar = new DesktopTaskbar(this, new DesktopTaskbar.Actions() {
+            public void apps() { setDrawerOpen(!mDrawerOpen, false); }
+            public void search() { setDrawerOpen(true, true); }
+            public void back() { if (mDrawerOpen) setDrawerOpen(false, false); else BridgeClient.sendBack(); }
+            public void home() { setDrawerOpen(false, false); }
+            public void recents() { showRecentTasks(); }
+            public void touchpad() { startActivity(new Intent(LauncherActivity.this, TouchpadActivity.class),
+                    ActivityOptions.makeBasic().setLaunchDisplayId(0).toBundle()); }
+            public void quickSettings() {
+                if (!BridgeService.openLauncherQuickSettings(mOverlayHost)) {
+                    BridgeService.refreshFromReceiver(LauncherActivity.this);
+                    Toast.makeText(LauncherActivity.this, "快捷设置正在准备，请稍后重试", Toast.LENGTH_SHORT).show();
+                }
+            }
+            public void launch(String pkg, String cls) { launchComponent(pkg, cls); }
+        });
+        mRoot.addView(mLocalTaskbar, new FrameLayout.LayoutParams(-1, dp(52), Gravity.BOTTOM));
         mOverlayHost = new FrameLayout(this);
         mOverlayHost.setClipChildren(false);
-        mOverlayHost.setClipToPadding(false);
-        mRoot.addView(mOverlayHost, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
+        mRoot.addView(mOverlayHost, new FrameLayout.LayoutParams(-1, -1));
         setContentView(mRoot);
-        mContent.requestFocus();
-        adjustColumns();
+        mRoot.post(this::adjustColumns);
+        mRoot.requestFocus();
         refreshHeader();
     }
 
+    private TextView desktopText(String text, float size, int color) {
+        TextView view = new TextView(this);
+        view.setText(text); view.setTextSize(TypedValue.COMPLEX_UNIT_DIP, size);
+        view.setTextColor(color); view.setGravity(Gravity.CENTER_VERTICAL);
+        return view;
+    }
+
+    private void setDrawerOpen(boolean open, boolean search) {
+        setDrawerOpen(open, search, true);
+    }
+
+    private void setDrawerOpen(boolean open, boolean search, boolean animate) {
+        if (mDrawerOpen == open) {
+            if (open && search) mSearchInput.requestFocus();
+            return;
+        }
+        mDrawerOpen = open;
+        UiMotion.drawer(mDrawer, mContent, open, animate, this::clearSearch);
+        if (open) {
+            if (search) mSearchInput.requestFocus(); else mRoot.requestFocus();
+        } else {
+            mRoot.requestFocus();
+            ((android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE))
+                    .hideSoftInputFromWindow(mSearchInput.getWindowToken(), 0);
+        }
+    }
+
+    private void refreshShortcuts() {
+        mShortcuts.removeAllViews();
+        java.util.Set<String> pinned = getSharedPreferences("desktop", 0).getStringSet("shortcuts", null);
+        List<AppEntry> entries = new ArrayList<>();
+        for (ResolveInfo favorite : DesktopTaskbar.favorites(this)) {
+            String pkg = favorite.activityInfo.packageName;
+            if (pinned != null && !pinned.contains(pkg)) continue;
+            for (AppEntry entry : mAllApps) {
+                if (entry.pkg.equals(pkg)) { entries.add(entry); break; }
+            }
+        }
+        if (pinned != null) for (AppEntry entry : mAllApps) {
+            if (pinned.contains(entry.pkg) && !entries.contains(entry)) entries.add(entry);
+        }
+        for (AppEntry entry : entries) {
+            LinearLayout item = new LinearLayout(this);
+            item.setOrientation(LinearLayout.VERTICAL); item.setGravity(Gravity.CENTER);
+            item.setBackground(DesktopStyle.feedback(this, 8)); item.setFocusable(true);
+            ImageView icon = new ImageView(this); icon.setImageDrawable(entry.icon);
+            item.addView(icon, new LinearLayout.LayoutParams(dp(46), dp(46)));
+            TextView label = desktopText(entry.label, 11, Color.WHITE);
+            label.setGravity(Gravity.CENTER); label.setSingleLine(true);
+            label.setEllipsize(TextUtils.TruncateAt.END);
+            label.setShadowLayer(dp(3), 0, dp(1), 0x99000000);
+            LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(dp(92), dp(29));
+            item.addView(label, labelLp);
+            item.setOnClickListener(v -> launchApp(entry));
+            item.setOnLongClickListener(v -> { showAppContext(entry, v); return true; });
+            item.setOnGenericMotionListener((v, event) -> {
+                if (event.getActionMasked() == MotionEvent.ACTION_BUTTON_PRESS
+                        && event.getActionButton() == MotionEvent.BUTTON_SECONDARY) {
+                    showAppContext(entry, v); return true;
+                }
+                return false;
+            });
+            mShortcuts.addView(item, new LinearLayout.LayoutParams(dp(100), dp(94)));
+        }
+    }
+
+    private void showAppContext(AppEntry entry, View anchor) {
+        android.widget.PopupMenu menu = new android.widget.PopupMenu(this, anchor);
+        menu.getMenu().add("打开").setOnMenuItemClickListener(item -> { launchApp(entry); return true; });
+        java.util.Set<String> saved = getSharedPreferences("desktop", 0).getStringSet("shortcuts", null);
+        java.util.Set<String> pins = new java.util.HashSet<>();
+        if (saved == null) for (ResolveInfo favorite : DesktopTaskbar.favorites(this)) {
+            pins.add(favorite.activityInfo.packageName);
+        } else pins.addAll(saved);
+        boolean pinned = pins.contains(entry.pkg);
+        menu.getMenu().add(pinned ? "从桌面移除" : "添加到桌面").setOnMenuItemClickListener(item -> {
+            if (pinned) pins.remove(entry.pkg); else pins.add(entry.pkg);
+            getSharedPreferences("desktop", 0).edit().putStringSet("shortcuts", pins).apply();
+            refreshShortcuts(); return true;
+        });
+        boolean taskbarPinned = DesktopTaskbar.pinPackages(this).contains(entry.pkg);
+        menu.getMenu().add(taskbarPinned ? "从底栏取消固定" : "固定到底栏").setOnMenuItemClickListener(item -> {
+            DesktopTaskbar.setPinned(this, entry.pkg, !taskbarPinned);
+            return true;
+        });
+        menu.getMenu().add("窗口显示模式").setOnMenuItemClickListener(item -> {
+            showAppModeDialog(entry); return true;
+        });
+        menu.show();
+    }
+
+    private void showDesktopMenu(View anchor) {
+        android.widget.PopupMenu menu = new android.widget.PopupMenu(this, anchor);
+        menu.getMenu().add("Midex 设置").setOnMenuItemClickListener(item -> {
+            startActivity(new Intent(this, MainActivity.class), ActivityOptions.makeBasic().setLaunchDisplayId(0).toBundle());
+            return true;
+        });
+        menu.getMenu().add("应用显示模式").setOnMenuItemClickListener(item -> { showAllAppModesPicker(); return true; });
+        menu.getMenu().add("使用平板壁纸").setOnMenuItemClickListener(item -> { loadWallpaperAsync(true); return true; });
+        menu.getMenu().add("使用默认壁纸").setOnMenuItemClickListener(item -> {
+            getSharedPreferences("desktop", 0).edit().putBoolean("deviceWallpaper", false).apply();
+            mWallpaperView.setImageDrawable(null); return true;
+        });
+        menu.show();
+    }
+
+    private void launchComponent(String pkg, String cls) {
+        for (AppEntry entry : mAllApps) if (entry.pkg.equals(pkg) && entry.cls.equals(cls)) { launchApp(entry); return; }
+    }
+
+    private void showRecentTasks() {
+        new Thread(() -> {
+            List<BridgeClient.TaskEntry> tasks = BridgeClient.getTasks();
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                android.widget.PopupMenu menu = new android.widget.PopupMenu(this, mLocalTaskbar);
+                for (BridgeClient.TaskEntry task : tasks) if (task.onExt()) {
+                    menu.getMenu().add(task.pkg)
+                            .setOnMenuItemClickListener(item -> { BridgeClient.switchToTask(task.taskId, task.pkg); return true; });
+                }
+                if (menu.getMenu().size() == 0) menu.getMenu().add("没有打开的外接屏任务").setEnabled(false);
+                menu.show();
+            });
+        }, "DesktopRecents").start();
+    }
+
     private void loadWallpaperAsync(boolean force) {
+        if (force) getSharedPreferences("desktop", 0).edit().putBoolean("deviceWallpaper", true).apply();
+        if (!getSharedPreferences("desktop", 0).getBoolean("deviceWallpaper", false)) return;
         new Thread(() -> {
             Bitmap bmp = BridgeClient.getWallpaperBitmap(force);
             if (bmp != null && (force || bmp != mLastWpBitmap)) {
@@ -451,22 +536,25 @@ public class LauncherActivity extends Activity {
     }
 
     private void adjustColumns() {
-        if (mGrid == null) return;
-        DisplayMetrics dm = getResources().getDisplayMetrics();
-        float dpW = dm.widthPixels / Math.max(0.5f, dm.density) - 52f;
-        int cols = Math.max(5, Math.min(14, Math.round(dpW / 165f)));
-        mGrid.setNumColumns(cols);
+        if (mGrid == null || mRoot.getWidth() == 0) return;
+        int width = Math.min(dp(860), mRoot.getWidth() - dp(56));
+        int height = Math.min(dp(580), mRoot.getHeight() - dp(112));
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) mContent.getLayoutParams();
+        lp.width = Math.max(dp(240), width); lp.height = Math.max(dp(240), height);
+        mContent.setLayoutParams(lp);
+        mGrid.setNumColumns(Math.max(3, Math.min(8, (width - dp(60)) / dp(100))));
     }
 
     private void refreshHeader() {
         if (mHeaderInfo == null) return;
-        BridgeClient.Status st = BridgeClient.getStatus();
-        if (st.connected) {
-            mHeaderInfo.setText(st.virtW + "×" + st.virtH + " · " + st.virtDpi + "dpi · "
-                    + Math.round(st.virtFps) + "Hz · " + (st.inputToExt == 1 ? "扩展键鼠" : "平板键鼠"));
-        } else {
-            mHeaderInfo.setText("Display #" + getDisplay().getDisplayId());
+        if (mLocalTaskbar != null) {
+            mLocalTaskbar.setVisibility(BridgeService.hasDesktopTaskbar(getDisplay().getDisplayId()) ? View.GONE : View.VISIBLE);
+            Intent battery = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            int level = battery == null ? -1 : battery.getIntExtra("level", -1);
+            int scale = battery == null ? 100 : battery.getIntExtra("scale", 100);
+            mLocalTaskbar.status(level < 0 ? -1 : level * 100 / Math.max(1, scale));
         }
+        mHeaderInfo.setText(mAllApps.size() + " 个应用");
     }
 
     private void loadAppsAsync() {
@@ -491,6 +579,11 @@ public class LauncherActivity extends Activity {
                 AppEntry e = new AppEntry();
                 e.pkg = pkg;
                 e.cls = cls;
+                int orientation = ri.activityInfo.screenOrientation;
+                e.portrait = orientation == ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                        || orientation == ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
+                        || orientation == ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                        || orientation == ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT;
                 e.label = String.valueOf(ri.loadLabel(pm));
                 e.searchBlob = buildSearchBlob(e.label, pkg, hanLatin);
                 try { e.icon = ri.loadIcon(pm); } catch (Throwable ignored) {}
@@ -500,6 +593,8 @@ public class LauncherActivity extends Activity {
                 mAllApps.clear();
                 mAllApps.addAll(loaded);
                 applyFilter(mQuery);
+                refreshShortcuts();
+                refreshHeader();
             });
         }).start();
     }
@@ -523,29 +618,43 @@ public class LauncherActivity extends Activity {
     }
 
     private void launchApp(AppEntry e) {
+        setDrawerOpen(false, false);
         try {
             int dispId = getDisplay() != null ? getDisplay().getDisplayId() : 0;
+            boolean systemSettings = "com.android.settings".equals(e.pkg);
+            if (dispId > 0 && systemSettings && BridgeClient.getStatus().hasPrivilegedBackend()) {
+                new Thread(() -> {
+                    if (!BridgeClient.execSysAction(BridgeClient.SYS_OPEN_SETTINGS, dispId, Settings.ACTION_SETTINGS)) {
+                        runOnUiThread(() -> Toast.makeText(this, "无法打开系统设置", Toast.LENGTH_SHORT).show());
+                    }
+                }).start();
+                return;
+            }
             Intent intent = new Intent(Intent.ACTION_MAIN);
             intent.addCategory(Intent.CATEGORY_LAUNCHER);
             intent.setComponent(new ComponentName(e.pkg, e.cls));
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
             ActivityOptions opts = ActivityOptions.makeBasic();
-            boolean routeSettingsToTablet = !NavAssistService.isRunning()
-                    && ("com.android.settings".equals(e.pkg) || "com.miui.securitycenter".equals(e.pkg));
+            boolean routeSettingsToTablet = dispId > 0 && !NavAssistService.isRunning()
+                    && (systemSettings || "com.miui.securitycenter".equals(e.pkg));
+            if (dispId > 0 && !routeSettingsToTablet && BridgeClient.getService() != null) {
+                new Thread(() -> BridgeClient.launchComponent(e.pkg, e.cls)).start();
+                return;
+            }
             if (routeSettingsToTablet) {
                 opts.setLaunchDisplayId(0);
-                Toast.makeText(this, "未开启无障碍：已在平板打开设置", Toast.LENGTH_SHORT).show();
             } else if (dispId > 0) {
                 int mode = BridgeClient.prepareAppLaunch(e.pkg);
                 opts.setLaunchDisplayId(dispId);
                 try {
                     if (mode == BridgeClient.APP_MODE_LAND_FULL) {
                         opts.getClass().getMethod("setLaunchWindowingMode", int.class).invoke(opts, 1);
-                    } else if (mode == BridgeClient.APP_MODE_FREEFORM) {
+                    } else if (mode == BridgeClient.APP_MODE_FREEFORM || mode == BridgeClient.APP_MODE_DEFAULT) {
                         opts.getClass().getMethod("setLaunchWindowingMode", int.class).invoke(opts, 5);
                         DisplayMetrics dm = getResources().getDisplayMetrics();
-                        int w = Math.max(420, (int) (dm.widthPixels * 0.44f));
-                        int h = Math.max(540, (int) (dm.heightPixels * 0.84f));
+                        int h = Math.min(dm.heightPixels - dp(100), Math.max(dp(260), (int) (dm.heightPixels * 0.72f)));
+                        int w = Math.min(dm.widthPixels - dp(48), mode == BridgeClient.APP_MODE_DEFAULT && e.portrait
+                                ? Math.round(h * 9f / 16f) : Math.max(dp(360), (int) (dm.widthPixels * 0.64f)));
                         int l = Math.max(0, (dm.widthPixels - w) / 2);
                         int t = Math.max(20, (dm.heightPixels - h) / 2 - dp(16));
                         opts.setLaunchBounds(new Rect(l, t, l + w, t + h));
@@ -553,6 +662,9 @@ public class LauncherActivity extends Activity {
                 } catch (Throwable ignored) {}
             }
             startActivity(intent, opts.toBundle());
+            if (routeSettingsToTablet) {
+                Toast.makeText(this, e.label + "已在平板打开", Toast.LENGTH_SHORT).show();
+            }
         } catch (Throwable t) {
             BridgeClient.launchComponent(e.pkg, e.cls);
         }
@@ -587,14 +699,14 @@ public class LauncherActivity extends Activity {
         });
         int count = sorted.size();
         String[] items = new String[count + 1];
-        items[0] = "↺ 全部恢复【跟随系统默认】（清除所有自定义兼容覆盖）";
+        items[0] = "全部恢复桌面默认窗口（清除自定义兼容覆盖）";
         for (int i = 0; i < count; i++) {
             AppEntry ae = sorted.get(i);
             int m = getAppModeLocal(ae.pkg);
             items[i + 1] = ae.label + "  [" + BridgeClient.appModeLabel(m) + "]";
         }
         new AlertDialog.Builder(this)
-                .setTitle("🧩 分应用显示模式（也可以在桌面图标上长按 / 鼠标右键设置）")
+                .setTitle("分应用显示模式（也可以在桌面图标上长按 / 鼠标右键设置）")
                 .setItems(items, (d, which) -> {
                     if (which == 0) {
                         new Thread(() -> {
@@ -603,7 +715,7 @@ public class LauncherActivity extends Activity {
                             runOnUiThread(() -> {
                                 mAppModes = latest;
                                 if (mAdapter != null) mAdapter.notifyDataSetChanged();
-                                Toast.makeText(this, "已全部恢复系统默认模式（重启对应应用生效）", Toast.LENGTH_SHORT).show();
+                                Toast.makeText(this, "已恢复桌面默认窗口（重启对应应用生效）", Toast.LENGTH_SHORT).show();
                             });
                         }).start();
                     } else if (which - 1 < sorted.size()) {
@@ -618,7 +730,7 @@ public class LauncherActivity extends Activity {
         if (e == null) return;
         int cur = getAppModeLocal(e.pkg);
         String[] labels = {
-                (cur == 0 ? "● " : "") + "跟随系统默认（推荐微信 / 夸克 / 正常原生适配应用）",
+                (cur == 0 ? "● " : "") + "桌面默认窗口（由系统决定应用能否调整大小）",
                 (cur == 1 ? "● " : "") + "强制横屏全屏（适合红果短剧等竖屏视频类 App）",
                 (cur == 2 ? "● " : "") + "竖屏居中兼容（适合拼多多等固定比例竖屏页面）",
                 (cur == 3 ? "● " : "") + "自由小窗模式（以可缩放悬浮窗形式启动）"
@@ -675,7 +787,7 @@ public class LauncherActivity extends Activity {
 
                 iv = new ImageView(LauncherActivity.this);
                 iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
-                LinearLayout.LayoutParams ivLp = new LinearLayout.LayoutParams(dp(54), dp(54));
+                LinearLayout.LayoutParams ivLp = new LinearLayout.LayoutParams(dp(48), dp(48));
                 ivLp.bottomMargin = dp(6);
                 card.addView(iv, ivLp);
 
@@ -718,7 +830,7 @@ public class LauncherActivity extends Activity {
             card.setOnGenericMotionListener((v, ev) -> {
                 if (ev != null && ev.getActionMasked() == MotionEvent.ACTION_BUTTON_PRESS
                         && ev.getActionButton() == MotionEvent.BUTTON_SECONDARY) {
-                    showAppModeDialog(e);
+                    showAppContext(e, v);
                     return true;
                 }
                 return false;

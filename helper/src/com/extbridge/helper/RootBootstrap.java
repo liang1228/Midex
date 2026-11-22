@@ -15,6 +15,7 @@ import java.io.OutputStream;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /**
  * Root 模式激活器：通过 su 启动 app_process 守护进程，完全绕开无线调试/电脑 ADB。
@@ -30,6 +31,7 @@ public final class RootBootstrap {
     public static final String JAR_PATH = "/data/local/tmp/extbridge.jar";
     public static final String LOG_PATH = "/data/local/tmp/extbridge.log";
     public static final String AUTOSTART_PATH = "/data/adb/service.d/99-extbridge.sh";
+    public static final String MODULE_PATH = "/data/adb/modules/extbridge_autostart";
     private static final String DOWNLOAD_DIR = "/sdcard/Download/DSH-Go";
 
     private static final ExecutorService EXEC = Executors.newSingleThreadExecutor();
@@ -45,7 +47,7 @@ public final class RootBootstrap {
         void onResult(String json, String error);
     }
 
-    private static final class CmdResult {
+    static final class CmdResult {
         int exit = -1;
         String output = "";
         boolean timedOut;
@@ -63,13 +65,22 @@ public final class RootBootstrap {
 
     private RootBootstrap() {}
 
-    public static boolean isRootAvailable() {
-        Boolean c = sRootCache;
-        if (c != null) return c;
-        CmdResult r = runSu("id", 20000);
-        boolean ok = r.ok() && r.output != null && r.output.contains("uid=0");
-        sRootCache = ok;
-        return ok;
+    static boolean hasVerifiedRoot() {
+        return Boolean.TRUE.equals(sRootCache);
+    }
+
+    private static CmdResult verifyRoot(long timeoutMs) {
+        CmdResult r = runSu("id -u", timeoutMs);
+        sRootCache = r.ok() && "0".equals(r.output.trim());
+        return r;
+    }
+
+    static void checkRootAccessAsync(Consumer<Boolean> callback) {
+        EXEC.execute(() -> {
+            verifyRoot(30000);
+            boolean granted = hasVerifiedRoot();
+            MAIN.post(() -> callback.accept(granted));
+        });
     }
 
     public static String rootIdentity() {
@@ -82,18 +93,24 @@ public final class RootBootstrap {
         final Context app = ctx.getApplicationContext();
         EXEC.execute(() -> {
             step(listener, "正在请求 root 权限 (KernelSU / Magisk 请点允许)…");
-            CmdResult id = runSu("id", 60000);
-            if (!id.ok() || id.output == null || !id.output.contains("uid=0")) {
+            CmdResult id = verifyRoot(60000);
+            if (!hasVerifiedRoot()) {
                 result(listener, false, "Root 授权失败或超时。\n" + id.tail(600)
-                        + "\n\n请确认 KernelSU/Magisk 已授予 ExtBridge root 权限。");
+                        + "\n\n请确认 KernelSU/Magisk 已授予 Midex root 权限。");
                 return;
             }
-            sRootCache = true;
 
             BridgeClient.RuntimeInfo running = BridgeClient.getRuntimeInfo();
             if (running.valid && "system_server".equals(running.hostModeName)) {
                 result(listener, false, "当前已由 LSPosed 系统框架模式接管，无需再启动 root 守护进程。\n"
-                        + "如需改用 Root 模式，请在 LSPosed 中停用 ExtBridge 模块并重启。");
+                        + "如需改用 Root 模式，请在 LSPosed 中停用 Midex 模块并重启。");
+                return;
+            }
+            if (running.valid && running.uid == 0 && "root".equals(running.hostModeName)
+                    && BuildConfig.VERSION_NAME.equals(running.daemonVersion)
+                    && BridgeClient.getStatus().connected) {
+                result(listener, true, "Root 服务已运行，权限检查通过。\nuid="
+                        + running.uid + "  pid=" + running.pid);
                 return;
             }
 
@@ -112,12 +129,9 @@ public final class RootBootstrap {
                     + "chmod 644 " + JAR_PATH + "\n"
                     + "appops set com.extbridge.helper SYSTEM_ALERT_WINDOW allow 2>/dev/null || true\n"
                     + "appops set com.extbridge.helper POST_NOTIFICATION allow 2>/dev/null || true\n"
-                    + "appops set com.extbridge.helper RUN_ANY_IN_BACKGROUND allow 2>/dev/null || true\n"
                     + "pm grant com.extbridge.helper android.permission.POST_NOTIFICATIONS 2>/dev/null || true\n"
-                    + "dumpsys deviceidle whitelist +com.extbridge.helper >/dev/null 2>&1 || true\n"
                     + "pkill -f '^app_process.*ExtBridge' 2>/dev/null || true\n"
                     + "sleep 0.4\n"
-                    + ": > " + LOG_PATH + "\n"
                     + "cd /data/local/tmp\n"
                     + "CLASSPATH=" + JAR_PATH + " nohup app_process /data/local/tmp com.extbridge.daemon.ExtBridge "
                     + "</dev/null >>" + LOG_PATH + " 2>&1 &\n"
@@ -137,7 +151,12 @@ public final class RootBootstrap {
                 BridgeClient.Status st = BridgeClient.getStatus();
                 if (st.connected) {
                     BridgeClient.RuntimeInfo ri = BridgeClient.getRuntimeInfo();
-                    String mode = ri.valid ? ri.hostModeName : st.hostMode;
+                    if (!ri.valid || ri.uid != 0 || !"root".equals(ri.hostModeName)
+                            || !BuildConfig.VERSION_NAME.equals(ri.daemonVersion)) {
+                        sleep(400);
+                        continue;
+                    }
+                    String mode = ri.hostModeName;
                     result(listener, true, "Root 激活成功！\n运行模式: " + BridgeClient.hostModeLabel(mode)
                             + (ri.valid ? ("  uid=" + ri.uid + "  pid=" + ri.pid) : "")
                             + "\n" + (ri.valid && ri.selinux != null && !ri.selinux.isEmpty() ? ("SELinux: " + ri.selinux) : ""));
@@ -210,23 +229,41 @@ public final class RootBootstrap {
         final Context app = ctx.getApplicationContext();
         EXEC.execute(() -> {
             if (!enable) {
-                CmdResult r = runSu("rm -f '" + AUTOSTART_PATH + "'; echo REMOVED", 15000);
+                CmdResult r = runSu("set -e\nif [ -d '" + MODULE_PATH + "' ]; then touch '"
+                        + MODULE_PATH + "/disable'; fi\nrm -f '" + AUTOSTART_PATH + "'\necho REMOVED", 15000);
                 result(listener, r.ok() && r.output != null && r.output.contains("REMOVED"),
-                        r.ok() ? "已关闭 Root 开机自启" : ("关闭失败:\n" + r.tail(600)));
+                        r.ok() ? "已关闭模块自启动，当前桌面继续运行" : ("关闭失败:\n" + r.tail(600)));
                 return;
             }
             try {
-                File scriptFile = new File(app.getCacheDir(), "99-extbridge.sh");
-                try (FileOutputStream fos = new FileOutputStream(scriptFile)) {
-                    fos.write(buildAutostartScript().getBytes("UTF-8"));
+                File jar = extractJar(app);
+                for (String name : new String[]{"module.prop", "service.sh"}) {
+                    try (InputStream input = app.getAssets().open("autostart/" + name);
+                         OutputStream output = new FileOutputStream(new File(app.getCacheDir(), name))) {
+                        byte[] buffer = new byte[8192];
+                        int count;
+                        while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+                    }
                 }
-                String script = "mkdir -p /data/adb/service.d\n"
-                        + "cp '" + scriptFile.getAbsolutePath() + "' '" + AUTOSTART_PATH + "'\n"
-                        + "chmod 755 '" + AUTOSTART_PATH + "'\n"
+                String cache = app.getCacheDir().getAbsolutePath();
+                String script = "set -e\n[ \"$(id -u)\" = 0 ] || exit 1\n"
+                        + "if [ ! -d /data/adb/ksu ] && [ ! -d /data/adb/magisk ]; then echo 'KernelSU / Magisk module support required'; exit 1; fi\n"
+                        + "mkdir -p '" + MODULE_PATH + "'\n"
+                        + "cp '" + jar.getAbsolutePath() + "' '" + MODULE_PATH + "/extbridge.jar.tmp'\n"
+                        + "chmod 644 '" + MODULE_PATH + "/extbridge.jar.tmp'\n"
+                        + "mv -f '" + MODULE_PATH + "/extbridge.jar.tmp' '" + MODULE_PATH + "/extbridge.jar'\n"
+                        + "cp '" + cache + "/module.prop' '" + MODULE_PATH + "/module.prop'\n"
+                        + "cp '" + cache + "/service.sh' '" + MODULE_PATH + "/service.sh.tmp'\n"
+                        + "chmod 755 '" + MODULE_PATH + "/service.sh.tmp'\n"
+                        + "mv -f '" + MODULE_PATH + "/service.sh.tmp' '" + MODULE_PATH + "/service.sh'\n"
+                        + "touch '" + MODULE_PATH + "/skip_mount'\n"
+                        + "rm -f '" + MODULE_PATH + "/disable' '" + MODULE_PATH + "/remove' '" + AUTOSTART_PATH + "'\n"
+                        + "sh '" + MODULE_PATH + "/service.sh'\n"
                         + "echo INSTALLED";
                 CmdResult r = runSu(script, 20000);
                 result(listener, r.ok() && r.output != null && r.output.contains("INSTALLED"),
-                        r.ok() ? "已开启 Root 开机自启:\n" + AUTOSTART_PATH : ("安装失败:\n" + r.tail(800)));
+                        r.ok() ? "即插即用模块已开启。无需保留控制台后台；未接屏时停止轮询和前台服务。"
+                                : ("安装失败:\n" + r.tail(800)));
             } catch (Throwable t) {
                 result(listener, false, "安装失败: " + t);
             }
@@ -234,67 +271,12 @@ public final class RootBootstrap {
     }
 
     public static boolean isAutostartEnabled() {
-        CmdResult r = runSu("test -f '" + AUTOSTART_PATH + "' && echo YES || echo NO", 10000);
+        CmdResult r = runSu("[ -f '" + MODULE_PATH + "/service.sh' ] && [ ! -f '"
+                + MODULE_PATH + "/disable' ] && [ ! -f '" + MODULE_PATH + "/remove' ] && echo YES || echo NO", 10000);
         return r.output != null && r.output.contains("YES");
     }
 
     /** 读取 LSPosed 安装/版本信息，并在 UI 中给出启用指引。 */
-    public static String lsposedInfo(Context ctx) {
-        StringBuilder sb = new StringBuilder();
-        try {
-            boolean manager = false;
-            try {
-                ctx.getPackageManager().getPackageInfo("org.lsposed.manager", 0);
-                manager = true;
-            } catch (Throwable ignored) {}
-            sb.append(manager ? "LSPosed 管理器: 已安装\n" : "LSPosed 管理器: 未安装\n");
-            CmdResult r = runSu("cat /data/adb/modules/zygisk_lsposed/module.prop 2>/dev/null | head -8", 10000);
-            if (r.output != null && r.output.contains("version=")) {
-                sb.append("LSPosed 框架: 已安装\n");
-                for (String line : r.output.split("\n")) {
-                    if (line.startsWith("version")) sb.append(line).append('\n');
-                }
-            } else {
-                sb.append("LSPosed 框架: 未检测到 /data/adb/modules/zygisk_lsposed\n");
-            }
-            BridgeClient.RuntimeInfo ri = BridgeClient.getRuntimeInfo();
-            if (ri.valid && "system_server".equals(ri.hostModeName)) {
-                sb.append("\n状态: ✅ 模块已注入 system_server，当前由 LSPosed 模式接管\n");
-            } else {
-                sb.append("\n状态: 尚未注入 system_server\n")
-                        .append("启用步骤:\n")
-                        .append("1. 打开 LSPosed 管理器 → 模块 → 勾选 ExtBridge\n")
-                        .append("2. 作用域勾选「系统框架」(android)\n")
-                        .append("3. 重启平板（或软重启 system_server）\n")
-                        .append("4. 回到本页，运行模式应显示「LSPosed 系统框架模式」\n");
-            }
-        } catch (Throwable t) {
-            sb.append("读取失败: ").append(t);
-        }
-        return sb.toString();
-    }
-
-    private static String buildAutostartScript() {
-        return "#!/system/bin/sh\n"
-                + "# ExtBridge root autostart (generated by helper app)\n"
-                + "(\n"
-                + "  until [ \"$(getprop sys.boot_completed)\" = \"1\" ]; do sleep 2; done\n"
-                + "  sleep 8\n"
-                + "  # LSPosed 模块已接管时不要重复启动\n"
-                + "  [ \"$(getprop extbridge.lsposed)\" = \"1\" ] && exit 0\n"
-                + "  APK=$(pm path com.extbridge.helper | head -n1 | cut -d: -f2)\n"
-                + "  [ -n \"$APK\" ] || exit 0\n"
-                + "  unzip -p \"$APK\" assets/extbridge.jar > " + JAR_PATH + " 2>/dev/null\n"
-                + "  [ -s " + JAR_PATH + " ] || exit 0\n"
-                + "  chmod 644 " + JAR_PATH + "\n"
-                + "  pkill -f '^app_process.*ExtBridge' 2>/dev/null\n"
-                + "  sleep 0.3\n"
-                + "  cd /data/local/tmp\n"
-                + "  CLASSPATH=" + JAR_PATH + " nohup app_process /data/local/tmp com.extbridge.daemon.ExtBridge "
-                + "</dev/null >>" + LOG_PATH + " 2>&1 &\n"
-                + ") &\n";
-    }
-
     private static File extractJar(Context ctx) throws Exception {
         File out = new File(ctx.getCacheDir(), "extbridge.jar");
         File tmp = new File(ctx.getCacheDir(), "extbridge.jar.tmp");
@@ -309,7 +291,7 @@ public final class RootBootstrap {
         return out;
     }
 
-    private static CmdResult runSu(String command, long timeoutMs) {
+    static CmdResult runSu(String command, long timeoutMs) {
         CmdResult res = new CmdResult();
         java.lang.Process p = null;
         try {

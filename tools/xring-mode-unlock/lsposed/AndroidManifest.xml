@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.extbridge.refreshunlock"
+    android:versionCode="4" android:versionName="0.4.0">
+    <application android:label="ExtBridge 显示与窗口扩展" android:allowBackup="false"
+        android:hasCode="true">
+        <meta-data android:name="xposedmodule" android:value="true" />
+        <meta-data android:name="xposedminversion" android:value="93" />
+        <meta-data android:name="xposeddescription"
+            android:value="指定 XRING 固件：内屏限刷策略解锁、外屏桌面直角窗口与系统窗口栏。作用域为系统框架和系统界面，功能独立控制。" />
+        <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
+    </application>
+</manifest>

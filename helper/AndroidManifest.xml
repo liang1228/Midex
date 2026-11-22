@@ -1,8 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.extbridge.helper"
-    android:versionCode="4"
-    android:versionName="4.0.0-root">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -13,14 +10,16 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
 
     <application
         android:allowBackup="false"
-        android:extractNativeLibs="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
-        android:label="ExtBridge"
+        android:label="@string/app_name"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
         <!-- LSPosed：同一个 APK 也可作为系统框架模块使用 -->
@@ -29,7 +28,10 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="ExtBridge 系统框架模式：把扩展桌面/驱动采集注入 system_server，无需每次 root 拉起" />
+            android:value="Midex Root 模式的显示与窗口扩展" />
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/extbridge_xposed_scope" />
         <meta-data
             android:name="xposedminversion"
             android:value="93" />
@@ -37,10 +39,11 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="ExtBridge"
+            android:label="@string/app_name"
             android:launchMode="singleTask"
             android:taskAffinity="com.extbridge.helper.tablet"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize">
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode|fontScale"
+            android:theme="@style/ConsoleTheme">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -50,7 +53,8 @@
         <activity
             android:name=".TouchpadActivity"
             android:exported="true"
-            android:label="ExtBridge 触摸板"
+            android:label="Midex 触摸板"
+            android:theme="@style/ConsoleTheme"
             android:launchMode="singleTask"
             android:taskAffinity="com.extbridge.helper.tablet"
             android:windowSoftInputMode="adjustResize|stateHidden"
@@ -59,7 +63,7 @@
         <activity
             android:name=".LauncherActivity"
             android:exported="true"
-            android:label="ExtBridge 桌面"
+            android:label="Midex 桌面"
             android:launchMode="singleTask"
             android:taskAffinity="com.extbridge.helper.extdesktop"
             android:resizeableActivity="true"
@@ -79,7 +83,7 @@
         <service
             android:name=".NavAssistService"
             android:exported="true"
-            android:label="ExtBridge 平板辅助手势"
+            android:label="Midex 平板辅助手势"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />

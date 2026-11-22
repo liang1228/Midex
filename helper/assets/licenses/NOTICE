@@ -1,0 +1,15 @@
+Liquid glass navigation components in com.extbridge.helper.ui.glass are adapted
+from compose-miuix-ui/miuix v0.9.4 (Apache-2.0), commit
+39c40f99844227b853f0049a0933b1f3ae6c00ba, example/shared/src/commonMain/kotlin/component.
+The upstream example credits Kyant0/AndroidLiquidGlass (Apache-2.0).
+Changes: Android app package, function name, and system dark-theme integration.
+Copyright 2026, compose-miuix-ui contributors.
+See miuix.txt for the Apache License 2.0.
+
+Vector icons are from Lucide. See lucide.txt for ISC/MIT notices.
+
+The bundled arm64 ADB executable is from henry5450/adb-for-android v35.0.2
+(cac210e42e050788b89bd4738b8d70374887932f). It is packaged as libadb.so
+without modifying the release binary.
+SHA-256: 22f0e87bec7ead6dc819fb5b2db2da8ff1d296c0affd8c51db853b64487f9ac8
+See adb-license.txt and adb-notice.txt for licensing and upstream sources.

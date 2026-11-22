@@ -20,6 +20,9 @@ out/
 *.log
 *.tmp
 *.xml.dump
+__pycache__/
+*.pyc
+device-ksu-restore-final.txt
 .DS_Store
 Thumbs.db
 
@@ -32,3 +35,4 @@ local.properties
 
 # Xposed 编译期 API（非运行时打进 APK）
 !lsposed/libs/api-82.jar
+!gradle/wrapper/gradle-wrapper.jar

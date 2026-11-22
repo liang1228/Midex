@@ -1,0 +1,22 @@
+{
+  "settled_samples": 281,
+  "settled_seconds": 182.377,
+  "continuous_180_samples": 316,
+  "continuous_180_seconds": 191.607,
+  "all_drm_samples": 317,
+  "physical_hz": 179.9996,
+  "vertical_total": 1471,
+  "horizontal_total": 2720,
+  "pixel_clock_khz": 720200,
+  "max_sample_gap_seconds": 0.702,
+  "aligned_crosschecks": 16,
+  "desktop_logical_id": "36",
+  "inner_render_hz": 120.0,
+  "test_finished_device_time": "23:36:11.533000",
+  "rollback_messages": [
+    "[writeDump] write ERROR: Broken pipe",
+    "Deleted 1 rows"
+  ],
+  "rollback_verified": true,
+  "user_observation": "画面清楚，没有黑屏"
+}

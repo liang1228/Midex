@@ -1,0 +1,6 @@
+<resources>
+    <string-array name="extbridge_xposed_scope">
+        <item>android</item>
+        <item>com.android.systemui</item>
+    </string-array>
+</resources>

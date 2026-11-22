@@ -18,7 +18,19 @@ public class BridgeProvider extends ContentProvider {
 
     @Override
     public Bundle call(String method, String arg, Bundle extras) {
+        if ("getBinder".equals(method)) {
+            int uid = Binder.getCallingUid();
+            if (uid != 1000 && uid != 0 && uid != 2000 && uid != android.os.Process.myUid())
+                throw new SecurityException("Untrusted window controller");
+            Bundle result = new Bundle();
+            result.putBinder("cb", BridgeClient.getService());
+            return result;
+        }
         if ("setBinder".equals(method) && extras != null) {
+            int uid = Binder.getCallingUid();
+            if (uid != 0 && uid != 1000 && uid != 2000 && uid != android.os.Process.myUid()) {
+                throw new SecurityException("Untrusted bridge publisher");
+            }
             IBinder b = extras.getBinder("cb");
             if (b != null) {
                 BridgeClient.setBinder(b);

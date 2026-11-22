@@ -262,7 +262,24 @@ public final class AdbBootstrap {
     }
 
     public static String buildPcAdbCommand() {
-        return "adb shell \"(pm path com.extbridge.helper | head -n1 | cut -d: -f2; echo assets/extbridge.jar) | xargs unzip -p > /data/local/tmp/extbridge.jar && chmod 644 /data/local/tmp/extbridge.jar && appops set com.extbridge.helper SYSTEM_ALERT_WINDOW allow && appops set com.extbridge.helper RUN_ANY_IN_BACKGROUND allow && pm grant com.extbridge.helper android.permission.POST_NOTIFICATIONS 2>/dev/null; dumpsys deviceidle whitelist +com.extbridge.helper >/dev/null 2>&1; pkill -f '^app_process.*ExtBridge' 2>/dev/null; sleep 0.2; CLASSPATH=/data/local/tmp/extbridge.jar nohup app_process /data/local/tmp com.extbridge.daemon.ExtBridge >/data/local/tmp/extbridge.log 2>&1 </dev/null &\"";
+        return "adb shell \"" + buildShellBootstrap() + "\"";
+    }
+
+    private static String buildShellBootstrap() {
+        // Root activation may already own the legacy jar and log paths.
+        return "id -u | grep -qx 2000 || { echo ADB_SHELL_REQUIRED; exit 1; }; "
+                + "mkdir -p /data/local/tmp/extbridge-shell && cd /data/local/tmp/extbridge-shell || exit 1; "
+                + "(pm path com.extbridge.helper | head -n1 | cut -d: -f2; echo assets/extbridge.jar) "
+                + "| xargs unzip -p > extbridge.jar && test -s extbridge.jar || exit 1; "
+                + "appops set com.extbridge.helper SYSTEM_ALERT_WINDOW allow 2>/dev/null; "
+                + "appops set com.extbridge.helper RUN_ANY_IN_BACKGROUND allow 2>/dev/null; "
+                + "pm grant com.extbridge.helper android.permission.POST_NOTIFICATIONS 2>/dev/null; "
+                + "dumpsys deviceidle whitelist +com.extbridge.helper >/dev/null 2>&1; "
+                + "pkill -u 2000 -f '^app_process.*ExtBridge' 2>/dev/null; sleep 0.3; "
+                + "(CLASSPATH=/data/local/tmp/extbridge-shell/extbridge.jar nohup app_process /data/local/tmp "
+                + "com.extbridge.daemon.ExtBridge </dev/null >extbridge.log 2>&1 &); "
+                + "sleep 1; pgrep -u 2000 -f '^app_process.*ExtBridge' >/dev/null "
+                + "&& echo LAUNCH_DONE || { cat extbridge.log; exit 1; }";
     }
 
     public static boolean isNativeAdbAvailable(Context ctx) {
@@ -452,21 +469,7 @@ public final class AdbBootstrap {
         }
 
         postStep(listener, "已连接！正在释放 extbridge.jar 并授权启动守护进程...");
-        String bootstrapCmd =
-                "APK=$(pm path com.extbridge.helper | head -n1 | cut -d: -f2); "
-                + "unzip -p \"$APK\" assets/extbridge.jar > /data/local/tmp/extbridge.jar && "
-                + "chmod 644 /data/local/tmp/extbridge.jar && "
-                + "appops set com.extbridge.helper SYSTEM_ALERT_WINDOW allow 2>/dev/null; "
-                + "appops set com.extbridge.helper POST_NOTIFICATION allow 2>/dev/null; "
-                + "appops set com.extbridge.helper RUN_ANY_IN_BACKGROUND allow 2>/dev/null; "
-                + "pm grant com.extbridge.helper android.permission.POST_NOTIFICATIONS 2>/dev/null; "
-                + "dumpsys deviceidle whitelist +com.extbridge.helper >/dev/null 2>&1; "
-                + "pkill -f '^app_process.*ExtBridge' 2>/dev/null; "
-                + "sleep 0.3; "
-                + "(CLASSPATH=/data/local/tmp/extbridge.jar nohup app_process /data/local/tmp com.extbridge.daemon.ExtBridge </dev/null >/data/local/tmp/extbridge.log 2>&1 &); "
-                + "sleep 0.6; echo LAUNCH_DONE";
-
-        CmdRes shRes = runAdb(appCtx, 18000, "-s", target, "shell", bootstrapCmd);
+        CmdRes shRes = runAdb(appCtx, 18000, "-s", target, "shell", buildShellBootstrap());
         if (shRes.code != 0 || shRes.output == null || !shRes.output.contains("LAUNCH_DONE")) {
             postResult(listener, false, "远程 Shell 启动失败:\n" + shRes.output);
             return;
@@ -476,14 +479,15 @@ public final class AdbBootstrap {
         long deadline = System.currentTimeMillis() + 7000;
         while (System.currentTimeMillis() < deadline) {
             BridgeClient.requestBinder(appCtx);
-            if (BridgeClient.getStatus().connected) {
+            BridgeClient.RuntimeInfo runtime = BridgeClient.getRuntimeInfo();
+            if (runtime.valid && runtime.uid == 2000 && BridgeClient.getStatus().connected) {
                 cancelPairingNotification(appCtx);
-                postResult(listener, true, "无线调试激活成功，ExtBridge 服务已就绪！");
+                postResult(listener, true, "无线调试激活成功，Midex 服务已就绪！");
                 return;
             }
             try { Thread.sleep(350); } catch (InterruptedException ignored) { break; }
         }
-        postResult(listener, false, "守护进程命令已下发，但暂未收到 Binder 握手，请稍等几秒或查看 /data/local/tmp/extbridge.log");
+        postResult(listener, false, "暂未收到 ADB Shell 服务的握手。日志位于 /data/local/tmp/extbridge-shell/extbridge.log");
     }
 
     private static final class CmdRes {
@@ -593,7 +597,7 @@ public final class AdbBootstrap {
                 ? new Notification.Builder(ctx, PAIR_CHANNEL_ID)
                 : new Notification.Builder(ctx);
         nb.setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-                .setContentTitle("ExtBridge 无线调试配对助手")
+                .setContentTitle("Midex 无线调试配对助手")
                 .setContentText(body)
                 .setStyle(new Notification.BigTextStyle().bigText(body))
                 .setContentIntent(openPi)

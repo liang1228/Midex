@@ -2,7 +2,7 @@ package com.extbridge.lsposed;
 
 import android.content.Context;
 import android.os.Handler;
-import android.os.Looper;
+import android.os.HandlerThread;
 
 import com.extbridge.daemon.ExtBridge;
 
@@ -34,7 +34,7 @@ public class ExtBridgeModule implements IXposedHookLoadPackage {
     private static final String TAG = "ExtBridge-LSPosed";
     private static final String KILL_SWITCH = "/data/adb/extbridge/disable_lsposed";
 
-    private static Handler sMain;
+    private static Handler sWorker;
     private static boolean sScheduled;
     private static boolean sStarted;
     private static int sAttempts;
@@ -70,10 +70,14 @@ public class ExtBridgeModule implements IXposedHookLoadPackage {
 
     private static synchronized void schedule(long delayMs) {
         if (sStarted) return;
-        if (sMain == null) sMain = new Handler(Looper.getMainLooper());
+        if (sWorker == null) {
+            HandlerThread worker = new HandlerThread("ExtBridge-boot");
+            worker.start();
+            sWorker = new Handler(worker.getLooper());
+        }
         if (sScheduled) return;
         sScheduled = true;
-        sMain.postDelayed(ExtBridgeModule::boot, delayMs);
+        sWorker.postDelayed(ExtBridgeModule::boot, delayMs);
     }
 
     private static synchronized void boot() {

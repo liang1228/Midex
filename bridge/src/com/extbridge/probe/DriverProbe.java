@@ -185,8 +185,19 @@ public final class DriverProbe {
     public static Map<String, Object> parseEdid(byte[] e) {
         try {
             if (e == null || e.length < 128) return null;
-            if ((e[0] & 0xff) != 0x00 || (e[1] & 0xff) != 0xff || (e[7] & 0xff) != 0x00) return null;
+            byte[] header = {0, -1, -1, -1, -1, -1, -1, 0};
+            for (int i = 0; i < header.length; i++) if (e[i] != header[i]) return null;
             Map<String, Object> m = new LinkedHashMap<>();
+            int blocks = Math.min(1 + (e[126] & 0xff), e.length / 128);
+            List<Boolean> checksums = new ArrayList<>();
+            for (int block = 0; block < blocks; block++) {
+                int sum = 0;
+                for (int i = block * 128; i < (block + 1) * 128; i++) sum += e[i] & 0xff;
+                checksums.add((sum & 0xff) == 0);
+            }
+            m.put("blockChecksumsValid", checksums);
+            m.put("complete", e.length >= (1 + (e[126] & 0xff)) * 128);
+            m.put("checksumValid", !checksums.contains(false));
             int mfg = ((e[8] & 0xff) << 8) | (e[9] & 0xff);
             StringBuilder name = new StringBuilder();
             for (int shift : new int[]{10, 5, 0}) {
@@ -212,19 +223,7 @@ public final class DriverProbe {
                 int o = 54 + i * 18;
                 int clock = ((e[o + 1] & 0xff) << 8) | (e[o] & 0xff);
                 if (clock != 0) {
-                    int hActive = ((e[o + 4] & 0xf0) << 4) | (e[o + 2] & 0xff);
-                    int hBlank = ((e[o + 4] & 0x0f) << 8) | (e[o + 3] & 0xff);
-                    int vActive = ((e[o + 7] & 0xf0) << 4) | (e[o + 5] & 0xff);
-                    int vBlank = ((e[o + 7] & 0x0f) << 8) | (e[o + 6] & 0xff);
-                    int hTotal = hActive + hBlank;
-                    int vTotal = vActive + vBlank;
-                    double refresh = (clock * 10.0 * 1000.0) / (hTotal * (double) vTotal);
-                    Map<String, Object> d = new LinkedHashMap<>();
-                    d.put("pixelClockKHz", clock * 10);
-                    d.put("width", hActive);
-                    d.put("height", vActive);
-                    d.put("refresh", Math.round(refresh * 100) / 100.0);
-                    descriptors.add(d);
+                    if (checksums.get(0)) addDetailedTiming(e, o, "base", descriptors);
                 } else {
                     int tag = e[o + 3] & 0xff;
                     if (tag == 0xfc) {
@@ -245,17 +244,44 @@ public final class DriverProbe {
             if (serialText != null && !serialText.isEmpty()) m.put("serialText", serialText);
             if (range != null) m.put("range", range);
             m.put("detailedTimings", descriptors);
-            if (e.length >= 132 && (e[128] & 0xff) == 0x02) {
+            for (int block = 1; block < blocks; block++) {
+                int start = block * 128;
+                if ((e[start] & 0xff) != 0x02 || !checksums.get(0) || !checksums.get(block)) continue;
                 Map<String, Object> cta = new LinkedHashMap<>();
-                cta.put("revision", e[129] & 0xff);
-                cta.put("dtdOffset", e[130] & 0xff);
-                cta.put("flags", String.format(Locale.US, "0x%02X", e[131] & 0xff));
-                m.put("cta", cta);
+                int offset = e[start + 2] & 0xff;
+                cta.put("revision", e[start + 1] & 0xff);
+                cta.put("dtdOffset", offset);
+                cta.put("flags", String.format(Locale.US, "0x%02X", e[start + 3] & 0xff));
+                if (!m.containsKey("cta")) m.put("cta", cta);
+                if (offset < 4 || offset > 109) continue;
+                for (int o = start + offset; o + 18 <= start + 127; o += 18) {
+                    addDetailedTiming(e, o, "CTA-861", descriptors);
+                }
             }
             return m;
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    private static void addDetailedTiming(byte[] e, int o, String source, List<Object> timings) {
+        int clock = ((e[o + 1] & 0xff) << 8) | (e[o] & 0xff);
+        if (clock == 0) return;
+        int width = ((e[o + 4] & 0xf0) << 4) | (e[o + 2] & 0xff);
+        int hBlank = ((e[o + 4] & 0x0f) << 8) | (e[o + 3] & 0xff);
+        int height = ((e[o + 7] & 0xf0) << 4) | (e[o + 5] & 0xff);
+        int vBlank = ((e[o + 7] & 0x0f) << 8) | (e[o + 6] & 0xff);
+        if (width == 0 || height == 0 || hBlank == 0 || vBlank == 0) return;
+        boolean interlaced = (e[o + 17] & 0x80) != 0;
+        double refresh = clock * 10000.0 / ((width + hBlank) * (height + vBlank + (interlaced ? 0.5 : 0.0)));
+        Map<String, Object> timing = new LinkedHashMap<>();
+        timing.put("pixelClockKHz", clock * 10);
+        timing.put("width", width);
+        timing.put("height", interlaced ? height * 2 : height);
+        timing.put("refresh", Math.round(refresh * 100) / 100.0);
+        timing.put("interlaced", interlaced);
+        timing.put("source", source);
+        timings.add(timing);
     }
 
     private static boolean hasToken(String s, String token) {

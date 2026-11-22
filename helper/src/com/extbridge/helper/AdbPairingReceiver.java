@@ -33,7 +33,7 @@ public class AdbPairingReceiver extends BroadcastReceiver {
 
         final PendingResult pr = goAsync();
         final Context appCtx = context.getApplicationContext();
-        AdbBootstrap.showPairingNotification(appCtx, "正在用配对码 " + text + " 配对并启动 ExtBridge...");
+        AdbBootstrap.showPairingNotification(appCtx, "正在用配对码 " + text + " 配对并启动 Midex...");
         AdbBootstrap.pairFromNotificationAsync(appCtx, text, new AdbBootstrap.ProgressListener() {
             @Override
             public void onStep(String message) {

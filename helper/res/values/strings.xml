@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">ExtBridge</string>
-    <string name="nav_assist_desc">ExtBridge 可选辅助手势兜底服务：用于在系统手势偶发无响应时提供返回与主页功能。</string>
+    <string name="app_name">Midex</string>
+    <string name="nav_assist_desc">Midex 可选辅助手势兜底服务：用于在系统手势偶发无响应时提供返回与主页功能。</string>
 </resources>

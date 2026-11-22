@@ -30,7 +30,7 @@ public class ControlReceiver extends BroadcastReceiver {
             int next = BridgeClient.toggleMirrorMode();
             BridgeService.refreshFromReceiver(context);
             Toast.makeText(context,
-                    next == 1 ? "已切换为【原生镜像模式】" : "已切换为【ExtBridge DeX 扩展模式】",
+                    next == 1 ? "已切换为【原生镜像模式】" : "已切换为【Midex 扩展桌面】",
                     Toast.LENGTH_SHORT).show();
         }
     }

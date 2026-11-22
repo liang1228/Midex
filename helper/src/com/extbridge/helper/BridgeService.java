@@ -55,6 +55,8 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -64,7 +66,6 @@ public class BridgeService extends Service {
     private static final int NOTIF_ID = 301;
     private static volatile BridgeService sInstance;
     private static ViewGroup sLauncherHost;
-    private static int sLauncherHostDisplayId = -1;
 
     private Handler mHandler;
     private final ExecutorService mBg = Executors.newSingleThreadExecutor();
@@ -83,24 +84,33 @@ public class BridgeService extends Service {
     private boolean mLastObservedA11y = false;
     private int mWinType = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
 
-    // Dock window (macOS style centered frosted glass)
+    // External desktop taskbar.
     private LinearLayout mDockRoot;
+    private DesktopTaskbar mDesktopBar;
+    private DesktopWindowChrome mWindowChrome;
     private WindowManager.LayoutParams mDockLp;
     private boolean mDockHidden = false;
     private TextView mRestorePill;
     private WindowManager.LayoutParams mRestoreLp;
-    private TextView mBtnToggle;
     private LinearLayout mTaskStrip;
-    private View mTaskDivider;
     private LinearLayout mTrayBtn;
     private MiniIconView mTrayWifiIcon;
     private MiniIconView mTrayVolIcon;
     private MiniBatteryView mTrayBattView;
     private TextView mTrayBattPct;
 
-    // Win11 Quick Settings Flyout window (no brightness slider)
+    // Quick settings above the system tray.
     private FrameLayout mPanelRoot;
     private LinearLayout mPanelCard;
+    private LinearLayout mPanelOverview;
+    private ConnectionPanel mConnections;
+    private final BluetoothDiscovery mBluetooth = new BluetoothDiscovery(this, this::onBluetoothChanged,
+            this::onBluetoothPairingFailed, this::onBluetoothPairingRequest);
+    private final Runnable mRefreshBluetooth = () -> refreshConnections(false);
+    private int mConnectionRequest;
+    private String mPanelWifiSsid = "";
+    private long mLastWifiScan;
+    private final Runnable mReloadConnections = () -> refreshConnections(false);
     private WindowManager.LayoutParams mPanelLp;
     private boolean mPanelOpen = false;
     private boolean mTrayPressed = false;
@@ -138,6 +148,7 @@ public class BridgeService extends Service {
     private final HashMap<String, String> mLabelCache = new HashMap<>();
     private String mLastTaskSig = "";
     private BridgeClient.Status mLastStatus = new BridgeClient.Status();
+    private boolean mDestroyed;
     private BridgeClient.SysStatus mLastSys = new BridgeClient.SysStatus();
     private int mBattPct = 100;
     private boolean mBattCharging = false;
@@ -171,6 +182,8 @@ public class BridgeService extends Service {
     };
 
     public static void ensureStarted(Context ctx) {
+        BridgeClient.Status state = BridgeClient.getStatus();
+        if (!state.connected || state.vdId <= 0) return;
         try {
             Intent i = new Intent(ctx, BridgeService.class);
             if (Build.VERSION.SDK_INT >= 26) {
@@ -246,11 +259,12 @@ public class BridgeService extends Service {
             BridgeClient.requestBinder(this);
         }
         pollRemoteStateAsync();
-        return START_STICKY;
+        return START_NOT_STICKY;
     }
 
     @Override
     public void onDestroy() {
+        mDestroyed = true;
         sInstance = null;
         NavAssistService.setOnStateChanged(null);
         try { unregisterReceiver(mSysRx); } catch (Throwable ignored) {}
@@ -278,7 +292,7 @@ public class BridgeService extends Service {
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
-            NotificationChannel ch = new NotificationChannel(CH_ID, "ExtBridge 外接屏控制", NotificationManager.IMPORTANCE_LOW);
+            NotificationChannel ch = new NotificationChannel(CH_ID, "Midex 外接屏控制", NotificationManager.IMPORTANCE_LOW);
             ch.setDescription("通知栏一键切换平板/扩展屏键鼠、进入大触摸板及分辨率控制台");
             ch.setShowBadge(false);
             mNm.createNotificationChannel(ch);
@@ -320,26 +334,26 @@ public class BridgeService extends Service {
         String body;
         String toggleLabel;
         if (!st.connected) {
-            title = "ExtBridge 未连接后台服务";
+            title = "Midex 未连接后台服务";
             body = "点击打开控制台查看状态，或在电脑端启动 extbridge";
             toggleLabel = "⇄ 切换键鼠";
         } else if (mirrorActive) {
-            title = "ExtBridge 原生镜像模式 · 物理 Display #" + st.extId;
+            title = "Midex 原生镜像模式 · 物理 Display #" + st.extId;
             body = "外接屏正在同步手机/平板主屏 | 点击右侧「切回DeX」恢复独立大屏桌面";
             toggleLabel = st.inputToExt == 1 ? "⇄ 切到本机" : "⇄ 切回外接";
         } else if (st.vdId <= 0) {
-            title = "ExtBridge 待机中 · 等待 USB-C 外接屏";
+            title = "Midex 待机中 · 等待 USB-C 外接屏";
             body = "已配置预设 " + st.virtW + "×" + st.virtH + " (" + st.virtDpi + "dpi)";
             toggleLabel = st.inputToExt == 1 ? "⇄ 切到平板" : "⇄ 切回扩展屏";
         } else {
             String target = st.inputToExt == 1 ? "外接扩展屏" : "平板本机";
             String modeTag = mUsingA11yOverlay ? "无障碍B" : "兼容A";
-            title = "ExtBridge 已挂载(" + modeTag + ") · " + st.virtW + "×" + st.virtH + " @" + Math.round(st.virtFps) + "Hz";
+            title = "Midex 已挂载(" + modeTag + ") · " + st.virtW + "×" + st.virtH + " @" + Math.round(st.virtFps) + "Hz";
             body = "键鼠控制：【" + target + "】 | 点通知本体进控制台，右侧按钮一键回桌面";
             toggleLabel = st.inputToExt == 1 ? "⇄ 键鼠切回平板" : "⇄ 键鼠切回扩展屏";
         }
 
-        String act1Label = mirrorActive ? "🖥 切回DeX" : toggleLabel;
+        String act1Label = mirrorActive ? "切回DeX" : toggleLabel;
         PendingIntent act1Pi = mirrorActive ? piMirror : piToggle;
         String act3Label = mirrorActive ? toggleLabel : "⊞ 回扩展桌面";
         PendingIntent act3Pi = mirrorActive ? piToggle : piExtHome;
@@ -352,17 +366,23 @@ public class BridgeService extends Service {
                 .setOnlyAlertOnce(true)
                 .setContentIntent(piMain)
                 .addAction(new Notification.Action.Builder(null, act1Label, act1Pi).build())
-                .addAction(new Notification.Action.Builder(null, "🖐 大触摸板", piTp).build())
+                .addAction(new Notification.Action.Builder(null, "大触摸板", piTp).build())
                 .addAction(new Notification.Action.Builder(null, act3Label, act3Pi).build())
                 .build();
     }
 
     private void pollRemoteStateAsync() {
+        if (mDestroyed) return;
         mBg.execute(() -> {
             BridgeClient.Status st = BridgeClient.getStatus();
             List<BridgeClient.TaskEntry> tasks = (st.connected && st.vdId > 0) ? BridgeClient.getTasks() : null;
             BridgeClient.SysStatus sys = (st.connected && st.vdId > 0) ? BridgeClient.getSysStatus() : mLastSys;
-            mHandler.post(() -> applyStateOnUi(st, tasks, sys));
+            BridgeClient.DesktopWindow window = (st.connected && st.vdId > 0) ? BridgeClient.getDesktopWindow() : null;
+            mHandler.post(() -> {
+                if (mDestroyed) return;
+                applyStateOnUi(st, tasks, sys);
+                if (mWindowChrome != null) mWindowChrome.update(window != null && window.displayId == mAttachedVdId ? window : null);
+            });
         });
     }
 
@@ -373,22 +393,23 @@ public class BridgeService extends Service {
 
         if (!st.connected || st.vdId <= 0) {
             detachExtOverlays();
+            stopForeground(STOP_FOREGROUND_REMOVE);
+            stopSelf();
             return;
         }
         boolean a11yNow = NavAssistService.isRunning();
-        if (!a11yNow && !Settings.canDrawOverlays(this)) return;
+        boolean launcherNow = launcherHostOnDisplay(st.vdId);
+        if (!a11yNow && !launcherNow && !Settings.canDrawOverlays(this)) return;
 
         int targetOverlayDpi = computeOverlayDpi(st);
         if (st.vdId != mAttachedVdId
                 || a11yNow != mLastObservedA11y
-                || targetOverlayDpi != mOverlayDpi) {
+                || targetOverlayDpi != mOverlayDpi
+                || st.virtW != mOverlayW || st.virtH != mOverlayH) {
             attachExtOverlays(st);
-        } else if (st.virtW != mOverlayW || st.virtH != mOverlayH) {
-            mOverlayW = st.virtW;
-            mOverlayH = st.virtH;
-            mLastTaskSig = "";
-            repositionDock();
-            repositionPanel();
+        } else if (launcherNow && !mUsingA11yOverlay && mDockRoot != null
+                && mDockRoot.getParent() != sLauncherHost) {
+            syncOverlayHostSurface(false);
         }
 
         updateInputToggleUi(st.inputToExt);
@@ -397,7 +418,7 @@ public class BridgeService extends Service {
         refreshSysViews();
         if (mBtnPanelFullscreen != null) {
             boolean fsOn = st.fullscreenPolicy == 1;
-            mBtnPanelFullscreen.setText(fsOn ? "⛶ 桌面横屏:开" : "⛶ 桌面横屏:关");
+            mBtnPanelFullscreen.setText(fsOn ? "桌面横屏:开" : "桌面横屏:关");
             mBtnPanelFullscreen.setTextColor(fsOn ? 0xFF7DD3FC : 0xFFCBD5E1);
         }
     }
@@ -424,7 +445,7 @@ public class BridgeService extends Service {
                 mLastObservedA11y = true;
             }
         }
-        if (Settings.canDrawOverlays(this)) {
+        if (launcherHostOnDisplay(st.vdId) || Settings.canDrawOverlays(this)) {
             try {
                 attachWithContext(createDisplayContext(target),
                         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, false, st);
@@ -473,8 +494,16 @@ public class BridgeService extends Service {
         mLastTaskSig = "";
 
         buildDockOverlay(mExtCtx, st);
-        buildWin11PanelOverlay(mExtCtx, st);
+        buildQuickSettingsOverlay(mExtCtx, st);
         buildRestorePillOverlay(mExtCtx);
+        mWindowChrome = new DesktopWindowChrome(mExtCtx, mExtWm, mWinType, st.virtW, st.virtH,
+                (taskId, action, bounds) -> mBg.execute(() -> {
+                    boolean ok = BridgeClient.controlWindow(taskId, action, bounds);
+                    mHandler.post(() -> {
+                        if (!ok && action != 0 && mExtCtx != null) Toast.makeText(mExtCtx, "系统未能完成窗口操作", Toast.LENGTH_SHORT).show();
+                        if (action != 0) pollRemoteStateAsync();
+                    });
+                }));
         buildCursorOverlay(mExtCtx, st); // Added LAST so cursor stays above Dock & Flyout
         syncOverlayHostSurface(true);
     }
@@ -489,9 +518,8 @@ public class BridgeService extends Service {
         }
     }
 
-    public static void setLauncherOverlayHost(ViewGroup host, int displayId) {
+    public static void setLauncherOverlayHost(ViewGroup host) {
         sLauncherHost = host;
-        sLauncherHostDisplayId = displayId;
         BridgeService svc = sInstance;
         if (svc == null) return;
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -504,7 +532,6 @@ public class BridgeService extends Service {
     public static void clearLauncherOverlayHost(ViewGroup host) {
         if (sLauncherHost == host) {
             sLauncherHost = null;
-            sLauncherHostDisplayId = -1;
             BridgeService svc = sInstance;
             if (svc == null) return;
             if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -525,8 +552,12 @@ public class BridgeService extends Service {
     private boolean shouldHostInLauncher() {
         return !mUsingA11yOverlay
                 && mAttachedVdId > 0
-                && sLauncherHost != null
-                && sLauncherHostDisplayId == mAttachedVdId;
+                && launcherHostOnDisplay(mAttachedVdId);
+    }
+
+    private static boolean launcherHostOnDisplay(int displayId) {
+        Display display = sLauncherHost == null ? null : sLauncherHost.getDisplay();
+        return display != null && display.getDisplayId() == displayId;
     }
 
     private void removeOverlayView(View v) {
@@ -555,17 +586,18 @@ public class BridgeService extends Service {
         if (wantHost) {
             FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(
                     mDockLp != null ? mDockLp.width : ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    dp(mExtCtx, 52),
                     Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-            dlp.bottomMargin = dp(mExtCtx, 10);
+            dlp.bottomMargin = 0;
+            dlp.height = dp(mExtCtx, 52);
             sLauncherHost.addView(mDockRoot, dlp);
 
             FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(
                     dp(mExtCtx, 354), ViewGroup.LayoutParams.WRAP_CONTENT,
-                    Gravity.TOP | Gravity.LEFT);
+                    Gravity.BOTTOM | Gravity.RIGHT);
             if (mPanelLp != null) {
-                plp.leftMargin = mPanelLp.x;
-                plp.topMargin = mPanelLp.y;
+                plp.rightMargin = mPanelLp.x;
+                plp.bottomMargin = mPanelLp.y;
             }
             sLauncherHost.addView(mPanelRoot, plp);
 
@@ -627,147 +659,93 @@ public class BridgeService extends Service {
                 && winY >= loc[1] && winY <= (loc[1] + v.getHeight());
     }
 
-    private void buildDockOverlay(Context ctx, BridgeClient.Status st) {
-        mDockRoot = new LinearLayout(ctx);
-        mDockRoot.setOrientation(LinearLayout.HORIZONTAL);
-        mDockRoot.setGravity(Gravity.CENTER_VERTICAL);
-        mDockRoot.setBaselineAligned(false);
-        mDockRoot.setPadding(dp(ctx, 10), dp(ctx, 5), dp(ctx, 10), dp(ctx, 5));
-        mDockRoot.setElevation(dp(ctx, 10));
-        GradientDrawable dockBg = new GradientDrawable();
-        dockBg.setColor(0xD2121926);
-        dockBg.setCornerRadius(dp(ctx, 22));
-        dockBg.setStroke(1, 0x42FFFFFF);
-        mDockRoot.setBackground(dockBg);
+    public static boolean hasDesktopTaskbar(int displayId) {
+        BridgeService service = sInstance;
+        return service != null && service.mAttachedVdId == displayId
+                && service.mDockRoot != null && service.mDockRoot.getParent() != null && !service.mDockHidden;
+    }
 
-        // Left: App Launcher/Search, Back, Input Switch
-        TextView btnHome = makeDockBtn(ctx, "⊞ 桌面", 0x33FFFFFF, Color.WHITE);
-        btnHome.setOnClickListener(v -> {
-            setPanelOpen(false);
-            BridgeClient.relaunchLauncher();
+    static boolean openLauncherQuickSettings(ViewGroup host) {
+        BridgeService service = sInstance;
+        if (service == null || host == null || host.getDisplay() == null) return false;
+        setLauncherOverlayHost(host);
+        if (service.mPanelRoot == null || service.mPanelRoot.getParent() != host) {
+            BridgeClient.Status state = service.mLastStatus;
+            if (!state.connected || state.vdId != host.getDisplay().getDisplayId()) return false;
+            service.attachExtOverlays(state);
+        }
+        if (service.mPanelRoot == null || !service.mPanelRoot.isAttachedToWindow()) return false;
+        service.setPanelOpen(true);
+        return true;
+    }
+
+    private void showDesktopLauncher(boolean apps, boolean search, boolean recents) {
+        setPanelOpen(false);
+        mBg.execute(() -> {
+            BridgeClient.prepareDesktop();
+            mHandler.post(() -> openDesktopLauncher(apps, search, recents));
         });
-        mDockRoot.addView(btnHome);
+    }
 
-        TextView btnBack = makeDockBtn(ctx, "←", 0x26FFFFFF, Color.WHITE);
-        btnBack.setOnClickListener(v -> BridgeClient.sendBack());
-        mDockRoot.addView(btnBack);
+    private void openDesktopLauncher(boolean apps, boolean search, boolean recents) {
+        Intent intent = new Intent(this, LauncherActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                .putExtra("showApps", apps).putExtra("search", search).putExtra("showRecents", recents);
+        try {
+            ActivityOptions options = ActivityOptions.makeBasic().setLaunchDisplayId(mAttachedVdId);
+            startActivity(intent, options.toBundle());
+        } catch (Throwable error) {
+            BridgeClient.relaunchLauncher();
+        }
+    }
 
-        mBtnToggle = makeDockBtn(ctx, st.inputToExt == 1 ? "⇄ 外接" : "⇄ 平板",
-                st.inputToExt == 1 ? 0xCC2563EB : 0xCCEA580C, Color.WHITE);
-        mBtnToggle.setOnClickListener(v -> mBg.execute(() -> {
-            int m = BridgeClient.toggleInput();
-            mHandler.post(() -> {
-                updateInputToggleUi(m);
-                Toast.makeText(BridgeService.this, m == 1 ? "键鼠 -> 扩展屏" : "键鼠 -> 平板", Toast.LENGTH_SHORT).show();
-            });
-        }));
-        mDockRoot.addView(mBtnToggle);
-
-        mTaskDivider = makeVerticalDivider(ctx);
-        mTaskDivider.setVisibility(View.GONE);
-        mDockRoot.addView(mTaskDivider);
-
-        // Center: Multitasking running/recent apps strip
-        mTaskStrip = new LinearLayout(ctx);
-        mTaskStrip.setOrientation(LinearLayout.HORIZONTAL);
-        mTaskStrip.setGravity(Gravity.CENTER_VERTICAL);
-        mDockRoot.addView(mTaskStrip);
-
-        mDockRoot.addView(makeVerticalDivider(ctx));
-
-        // Right: Win11 System Tray Pill (Wi-Fi, Vol, Battery %, Clock + Date)
-        mTrayBtn = new LinearLayout(ctx);
-        mTrayBtn.setOrientation(LinearLayout.HORIZONTAL);
-        mTrayBtn.setGravity(Gravity.CENTER_VERTICAL);
-        mTrayBtn.setPadding(dp(ctx, 9), dp(ctx, 4), dp(ctx, 9), dp(ctx, 4));
-        updateTrayPillBackground(false);
-        mTrayBtn.setOnTouchListener((v, ev) -> {
-            int act = ev.getActionMasked();
-            if (act == MotionEvent.ACTION_DOWN) {
-                mTrayPressed = true;
+    private void buildDockOverlay(Context ctx, BridgeClient.Status st) {
+        mDesktopBar = new DesktopTaskbar(ctx, new DesktopTaskbar.Actions() {
+            public void apps() { showDesktopLauncher(true, false, false); }
+            public void search() { showDesktopLauncher(true, true, false); }
+            public void back() { mBg.execute(BridgeClient::sendBack); }
+            public void home() { showDesktopLauncher(false, false, false); }
+            public void recents() { showDesktopLauncher(false, false, true); }
+            public void touchpad() { openTabletTouchpad(); }
+            public void quickSettings() {
                 mHandler.removeCallbacks(mOutsideDismissTask);
-            } else if (act == MotionEvent.ACTION_UP || act == MotionEvent.ACTION_CANCEL) {
-                mTrayPressed = false;
-                mLastTrayUpMs = SystemClock.uptimeMillis();
+                mLastTrayToggleMs = SystemClock.uptimeMillis();
+                setPanelOpen(!mPanelOpen);
+            }
+            public void launch(String pkg, String cls) {
+                if ("com.android.settings".equals(pkg) && mLastStatus.hasPrivilegedBackend()) {
+                    openExtSettings(Settings.ACTION_SETTINGS);
+                    return;
+                }
+                setPanelOpen(false);
+                mBg.execute(() -> BridgeClient.launchComponent(pkg, cls));
+            }
+        });
+        mDockRoot = mDesktopBar;
+        mTaskStrip = mDesktopBar.tasks;
+        mTrayBtn = mDesktopBar.tray;
+        mTrayBtn.setOnTouchListener((v, event) -> {
+            int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                mTrayPressed = true; mHandler.removeCallbacks(mOutsideDismissTask);
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                mTrayPressed = false; mLastTrayUpMs = SystemClock.uptimeMillis();
             }
             return false;
         });
-        mTrayBtn.setOnClickListener(v -> {
-            mHandler.removeCallbacks(mOutsideDismissTask);
-            mLastTrayToggleMs = SystemClock.uptimeMillis();
-            setPanelOpen(!mPanelOpen);
-        });
-
-        mTrayWifiIcon = new MiniIconView(ctx, MiniIconView.KIND_WIFI, Color.WHITE);
-        LinearLayout.LayoutParams wiLp = new LinearLayout.LayoutParams(dp(ctx, 16), dp(ctx, 16));
-        wiLp.rightMargin = dp(ctx, 6);
-        mTrayBtn.addView(mTrayWifiIcon, wiLp);
-
-        mTrayVolIcon = new MiniIconView(ctx, MiniIconView.KIND_VOLUME, Color.WHITE);
-        LinearLayout.LayoutParams voLp = new LinearLayout.LayoutParams(dp(ctx, 16), dp(ctx, 16));
-        voLp.rightMargin = dp(ctx, 6);
-        mTrayBtn.addView(mTrayVolIcon, voLp);
-
-        mTrayBattView = new MiniBatteryView(ctx);
-        LinearLayout.LayoutParams bvLp = new LinearLayout.LayoutParams(dp(ctx, 20), dp(ctx, 12));
-        bvLp.rightMargin = dp(ctx, 4);
-        mTrayBtn.addView(mTrayBattView, bvLp);
-
-        mTrayBattPct = new TextView(ctx);
-        mTrayBattPct.setTextColor(Color.WHITE);
-        mTrayBattPct.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 11f);
-        mTrayBattPct.getPaint().setFakeBoldText(true);
-        enforceSingleLine(mTrayBattPct);
-        LinearLayout.LayoutParams bpLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        bpLp.rightMargin = dp(ctx, 9);
-        mTrayBtn.addView(mTrayBattPct, bpLp);
-
-        LinearLayout clockCol = new LinearLayout(ctx);
-        clockCol.setOrientation(LinearLayout.VERTICAL);
-        clockCol.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
-
-        TextClock tcTime = new TextClock(ctx);
-        tcTime.setFormat24Hour("HH:mm");
-        tcTime.setFormat12Hour("HH:mm");
-        tcTime.setTextColor(Color.WHITE);
-        tcTime.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 11.5f);
-        tcTime.getPaint().setFakeBoldText(true);
-        enforceSingleLine(tcTime);
-        clockCol.addView(tcTime);
-
-        TextClock tcDate = new TextClock(ctx);
-        tcDate.setFormat24Hour("yyyy/M/d");
-        tcDate.setFormat12Hour("yyyy/M/d");
-        tcDate.setTextColor(0xFFCBD5E1);
-        tcDate.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 9.5f);
-        enforceSingleLine(tcDate);
-        clockCol.addView(tcDate);
-
-        mTrayBtn.addView(clockCol);
-        mDockRoot.addView(mTrayBtn);
-
         mDockLp = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                mWinType,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.MATCH_PARENT, dp(ctx, 52), mWinType,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT);
         mDockLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        mDockLp.x = 0;
-        mDockLp.y = dp(ctx, 10);
-
-        mDockRoot.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
-            if ((r - l) != (or - ol) || (b - t) != (ob - ot)) {
-                repositionDock();
-                if (mPanelOpen) repositionPanel();
+        mDockRoot.addOnLayoutChangeListener((v, l, t, r, bottom, ol, ot, or, ob) -> {
+            if (r - l != or - ol || bottom - t != ob - ot) {
+                repositionDock(); if (mPanelOpen) repositionPanel();
             }
         });
     }
 
-    private void buildWin11PanelOverlay(Context ctx, BridgeClient.Status st) {
+    private void buildQuickSettingsOverlay(Context ctx, BridgeClient.Status st) {
         mPanelRoot = new FrameLayout(ctx);
         mPanelRoot.setClipToPadding(false);
         mPanelRoot.setClipChildren(false);
@@ -777,10 +755,14 @@ public class BridgeService extends Service {
         mPanelCard.setOrientation(LinearLayout.VERTICAL);
         mPanelCard.setElevation(dp(ctx, 16));
         GradientDrawable panelBg = new GradientDrawable();
-        panelBg.setColor(0xEE18202E);
-        panelBg.setCornerRadius(dp(ctx, 16));
+        panelBg.setColor(0xF52A3850);
+        panelBg.setCornerRadius(dp(ctx, 20));
         panelBg.setStroke(1, 0x3FFFFFFF);
         mPanelCard.setBackground(panelBg);
+        mPanelCard.setClipToOutline(true);
+        mPanelOverview = new LinearLayout(ctx);
+        mPanelOverview.setOrientation(LinearLayout.VERTICAL);
+        mPanelCard.addView(mPanelOverview);
 
         LinearLayout body = new LinearLayout(ctx);
         body.setOrientation(LinearLayout.VERTICAL);
@@ -795,10 +777,10 @@ public class BridgeService extends Service {
 
         mTileWifi = new QuickTile(ctx, MiniIconView.KIND_WIFI, "Wi-Fi", true,
                 () -> execSysAndRefresh(BridgeClient.SYS_WIFI, -1, null),
-                () -> openExtSettings(Settings.ACTION_WIFI_SETTINGS));
+                () -> showConnections(true));
         mTileBt = new QuickTile(ctx, MiniIconView.KIND_BT, "蓝牙", true,
                 () -> execSysAndRefresh(BridgeClient.SYS_BT, -1, null),
-                () -> openExtSettings(Settings.ACTION_BLUETOOTH_SETTINGS));
+                () -> showConnections(false));
         mTileInput = new QuickTile(ctx, MiniIconView.KIND_DISPLAY_SWITCH, "外接控制", false,
                 () -> mBg.execute(() -> {
                     int m = BridgeClient.toggleInput();
@@ -878,7 +860,7 @@ public class BridgeService extends Service {
         volRow.addView(mVolSeekBar, skLp);
 
         TextView btnAudioMore = new TextView(ctx);
-        btnAudioMore.setText("🎚 ›");
+        btnAudioMore.setText("›");
         btnAudioMore.setTextColor(0xFFCBD5E1);
         btnAudioMore.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
         btnAudioMore.setPadding(dp(ctx, 8), dp(ctx, 4), dp(ctx, 6), dp(ctx, 4));
@@ -896,7 +878,7 @@ public class BridgeService extends Service {
         drLp.topMargin = dp(ctx, 10);
         dexRow.setLayoutParams(drLp);
 
-        mBtnPanelFullscreen = makeFooterChip(ctx, st.fullscreenPolicy == 1 ? "⛶ 桌面横屏:开" : "⛶ 桌面横屏:关");
+        mBtnPanelFullscreen = makeFooterChip(ctx, st.fullscreenPolicy == 1 ? "桌面横屏:开" : "桌面横屏:关");
         mBtnPanelFullscreen.setSingleLine(true);
         mBtnPanelFullscreen.setGravity(Gravity.CENTER);
         mBtnPanelFullscreen.setTextColor(st.fullscreenPolicy == 1 ? 0xFF7DD3FC : 0xFFCBD5E1);
@@ -913,7 +895,7 @@ public class BridgeService extends Service {
         dp1.rightMargin = dp(ctx, 6);
         dexRow.addView(mBtnPanelFullscreen, dp1);
 
-        mBtnPanelMirror = makeFooterChip(ctx, "📺 原生镜像");
+        mBtnPanelMirror = makeFooterChip(ctx, "原生镜像");
         mBtnPanelMirror.setSingleLine(true);
         mBtnPanelMirror.setGravity(Gravity.CENTER);
         mBtnPanelMirror.setOnClickListener(v -> {
@@ -928,7 +910,7 @@ public class BridgeService extends Service {
         dp2.rightMargin = dp(ctx, 6);
         dexRow.addView(mBtnPanelMirror, dp2);
 
-        mBtnPanelHideDock = makeFooterChip(ctx, "👁 隐藏Dock");
+        mBtnPanelHideDock = makeFooterChip(ctx, "隐藏Dock");
         mBtnPanelHideDock.setSingleLine(true);
         mBtnPanelHideDock.setGravity(Gravity.CENTER);
         mBtnPanelHideDock.setOnClickListener(v -> {
@@ -939,7 +921,7 @@ public class BridgeService extends Service {
         dexRow.addView(mBtnPanelHideDock, dp3);
 
         body.addView(dexRow);
-        mPanelCard.addView(body);
+        mPanelOverview.addView(body);
 
         // Footer Bar (Battery % left, Control Center + Settings right)
         LinearLayout footer = new LinearLayout(ctx);
@@ -962,18 +944,24 @@ public class BridgeService extends Service {
         mPanelBattText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
         footer.addView(mPanelBattText, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
-        TextView btnCtrl = makeFooterChip(ctx, "🎛 控制台");
+        TextView btnCtrl = makeFooterChip(ctx, "控制台");
         btnCtrl.setOnClickListener(v -> openTabletMain());
         LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         cLp.rightMargin = dp(ctx, 8);
         footer.addView(btnCtrl, cLp);
 
-        TextView btnSysSet = makeFooterChip(ctx, "⚙ 设置");
+        TextView btnSysSet = makeFooterChip(ctx, "设置");
         btnSysSet.setOnClickListener(v -> openExtSettings(Settings.ACTION_SETTINGS));
         footer.addView(btnSysSet);
 
-        mPanelCard.addView(footer);
+        mPanelOverview.addView(footer);
+        int listHeight = Math.min(dp(ctx, 270), Math.max(dp(ctx, 72), st.virtH - dp(ctx, 208)));
+        mConnections = new ConnectionPanel(ctx, listHeight, this::showPanelOverview,
+                this::setConnectionRadio, this::openConnectionSettings, this::refreshConnectionPanel,
+                this::changeConnection, this::setPanelTextInput, this::answerBluetoothPairing);
+        mConnections.setVisibility(View.GONE);
+        mPanelCard.addView(mConnections);
         mPanelRoot.addView(mPanelCard, new FrameLayout.LayoutParams(
                 dp(ctx, 338), FrameLayout.LayoutParams.WRAP_CONTENT));
         mPanelRoot.setVisibility(View.GONE);
@@ -988,9 +976,9 @@ public class BridgeService extends Service {
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
-        mPanelLp.gravity = Gravity.TOP | Gravity.LEFT;
-        mPanelLp.x = Math.max(16, st.virtW - dp(ctx, 366));
-        mPanelLp.y = Math.max(16, st.virtH - dp(ctx, 410));
+        mPanelLp.gravity = Gravity.BOTTOM | Gravity.RIGHT;
+        mPanelLp.x = dp(ctx, 14) - mPanelRoot.getPaddingRight();
+        mPanelLp.y = dp(ctx, 62);
 
         mPanelRoot.setOnTouchListener((v, ev) -> {
             if (ev.getActionMasked() == MotionEvent.ACTION_OUTSIDE && mPanelOpen) {
@@ -1098,6 +1086,7 @@ public class BridgeService extends Service {
 
         mPanelCard.animate().cancel();
         if (open) {
+            showPanelOverview();
             mPanelRoot.setVisibility(View.VISIBLE);
             repositionPanel();
             refreshLocalHardwareViews();
@@ -1125,6 +1114,7 @@ public class BridgeService extends Service {
                         .start();
             });
         } else {
+            closeConnections();
             int w = mPanelCard.getWidth();
             int h = mPanelCard.getHeight();
             if (w > 0 && h > 0) {
@@ -1147,6 +1137,171 @@ public class BridgeService extends Service {
         }
     }
 
+    private boolean showingConnections() {
+        return mPanelOpen && mConnections != null && mConnections.getVisibility() == View.VISIBLE;
+    }
+
+    private void showPanelOverview() {
+        closeConnections();
+        mConnections.setVisibility(View.GONE);
+        mPanelOverview.setVisibility(View.VISIBLE);
+    }
+
+    private void showConnections(boolean wifi) {
+        mPanelOverview.setVisibility(View.GONE);
+        mConnections.setVisibility(View.VISIBLE);
+        mPanelWifiSsid = mLastSys.wifiSsid;
+        mConnections.open(wifi, mLastSys.valid, wifi ? mLastSys.wifiOn : mLastSys.btOn);
+        if (!wifi && mLastSys.btOn && mBluetooth.hasPermission()) startBluetoothDiscovery(false);
+        refreshConnections(wifi);
+    }
+
+    private void closeConnections() {
+        mConnectionRequest++;
+        mHandler.removeCallbacks(mReloadConnections);
+        mHandler.removeCallbacks(mRefreshBluetooth);
+        mBluetooth.stop();
+        if (mConnections != null) mConnections.close();
+    }
+
+    private void refreshConnectionPanel() {
+        if (!showingConnections()) return;
+        if (!mConnections.isWifi() && mLastSys.btOn) startBluetoothDiscovery(true);
+        refreshConnections(true);
+    }
+
+    private void startBluetoothDiscovery(boolean userRequested) {
+        if (mConnections.isPairing()) return;
+        if (!mBluetooth.hasPermission()) {
+            if (userRequested && !LauncherActivity.requestNearbyDevices()) {
+                mConnections.failAction("请在桌面面板授予附近设备权限");
+            }
+            return;
+        }
+        boolean started = mBluetooth.start();
+        mConnections.setDiscovering(started);
+        if (!started && userRequested) mConnections.failAction("暂时无法搜索蓝牙设备");
+    }
+
+    static void onNearbyDevicesPermissionResult() {
+        BridgeService service = sInstance;
+        if (service == null || !service.showingConnections() || service.mConnections.isWifi()) return;
+        if (service.mBluetooth.hasPermission()) service.refreshConnectionPanel();
+        else service.mConnections.failAction("搜索需要附近设备权限");
+    }
+
+    private void onBluetoothChanged() {
+        if (!showingConnections() || mConnections.isWifi()) return;
+        mConnections.setDiscovering(mBluetooth.isScanning());
+        mHandler.removeCallbacks(mRefreshBluetooth);
+        mHandler.postDelayed(mRefreshBluetooth, 250L);
+    }
+
+    private void onBluetoothPairingFailed(String address) {
+        if (showingConnections()) mConnections.onPairingFailed(address);
+    }
+
+    private boolean onBluetoothPairingRequest(String address, int variant, int key) {
+        return showingConnections() && mConnections.showPairingPrompt(address, variant, key);
+    }
+
+    private void answerBluetoothPairing(String address, boolean accept, String pin) {
+        ConnectionPanel panel = mConnections;
+        mBg.execute(() -> {
+            boolean ok = BridgeClient.answerBluetoothPairing(address, accept, pin);
+            if (accept && !ok) mHandler.post(() -> {
+                if (showingConnections() && panel == mConnections && address.equals(panel.pairingAddress())) {
+                    panel.failAction("无法提交配对确认，请重新配对");
+                }
+            });
+        });
+    }
+
+    private void setPanelTextInput(boolean enabled) {
+        if (mPanelLp == null || mPanelRoot == null || mInLauncherHost || mExtWm == null) return;
+        if (enabled) {
+            mPanelLp.flags &= ~WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+            mPanelLp.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
+        } else {
+            mPanelLp.flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+        }
+        if (mPanelRoot.isAttachedToWindow()) mExtWm.updateViewLayout(mPanelRoot, mPanelLp);
+    }
+
+    private void refreshConnections(boolean scan) {
+        if (!showingConnections()) return;
+        boolean wifi = mConnections.isWifi();
+        int request = ++mConnectionRequest;
+        if (!mLastSys.valid || !(wifi ? mLastSys.wifiOn : mLastSys.btOn)) {
+            mConnections.showRows(null);
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        boolean startScan = wifi && scan && now - mLastWifiScan > 4000;
+        if (startScan) {
+            mLastWifiScan = now;
+            mHandler.removeCallbacks(mReloadConnections);
+            mHandler.postDelayed(mReloadConnections, 2000);
+        }
+        mBg.execute(() -> {
+            List<Bundle> rows = BridgeClient.connectionRows(wifi, startScan);
+            mHandler.post(() -> {
+                if (!showingConnections() || request != mConnectionRequest) return;
+                mConnections.showRows(wifi ? rows : mBluetooth.rows(rows));
+                if (mConnections.isWaiting()) {
+                    mHandler.removeCallbacks(mReloadConnections);
+                    mHandler.postDelayed(mReloadConnections, 1500L);
+                }
+            });
+        });
+    }
+
+    private void openConnectionSettings() {
+        if (showingConnections()) {
+            openExtSettings(mConnections.isWifi() ? Settings.ACTION_WIFI_SETTINGS : Settings.ACTION_BLUETOOTH_SETTINGS);
+        }
+    }
+
+    private void setConnectionRadio(boolean enabled) {
+        if (!showingConnections()) return;
+        if (!enabled && !mConnections.isWifi()) mBluetooth.stop();
+        execSysAndRefresh(mConnections.isWifi() ? BridgeClient.SYS_WIFI : BridgeClient.SYS_BT,
+                enabled ? 1 : 0, null);
+    }
+
+    private void changeConnection(Bundle entry, String password) {
+        if (!showingConnections()) return;
+        boolean wifi = mConnections.isWifi();
+        boolean connect = !entry.getBoolean("connected");
+        ConnectionPanel panel = mConnections;
+        String id = entry.getString("id", "");
+        if (!wifi && entry.getBoolean("nearby")) {
+            if (!"root".equals(mLastStatus.hostMode) && !"system_server".equals(mLastStatus.hostMode)) {
+                panel.failAction("当前后端不支持在此面板确认新设备配对");
+                return;
+            }
+            boolean started = mBluetooth.pair(id);
+            panel.setDiscovering(mBluetooth.isScanning());
+            if (!started) panel.failAction("无法发起配对，请确认设备处于配对模式");
+            refreshConnections(false);
+            return;
+        }
+        int page = mConnectionRequest;
+        mBg.execute(() -> {
+            boolean ok = wifi && connect && id.isEmpty()
+                    ? BridgeClient.joinWifi(entry.getString("name"), entry.getString("security"), password)
+                    : BridgeClient.changeConnection(wifi, connect, id);
+            mHandler.post(() -> {
+                if (!showingConnections() || panel != mConnections || wifi != panel.isWifi()) return;
+                if (!ok && page == mConnectionRequest) {
+                    panel.failAction(wifi ? "未能发起连接，请检查网络和密码" : "未能更改此蓝牙设备的连接状态");
+                }
+                refreshConnections(false);
+                pollRemoteStateAsync();
+            });
+        });
+    }
+
     private void updateTrayPillBackground(boolean active) {
         if (mTrayBtn == null || mExtCtx == null) return;
         GradientDrawable bg = new GradientDrawable();
@@ -1165,8 +1320,8 @@ public class BridgeService extends Service {
             }
             int dw = mDockRoot.getWidth();
             int maxW = Math.max(200, surfW - dp(mExtCtx, 20));
-            int targetW = dw > maxW ? maxW : WindowManager.LayoutParams.WRAP_CONTENT;
-            int bottomMargin = dp(mExtCtx, 10);
+            int targetW = WindowManager.LayoutParams.MATCH_PARENT;
+            int bottomMargin = 0;
             mDockLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
             mDockLp.width = targetW;
             mDockLp.x = 0;
@@ -1196,38 +1351,25 @@ public class BridgeService extends Service {
         if (mPanelRoot == null || mPanelLp == null || mExtCtx == null) return;
         try {
             int surfW = mOverlayW;
-            int surfH = mOverlayH;
             if (mInLauncherHost && sLauncherHost != null) {
                 if (sLauncherHost.getWidth() > 0) surfW = sLauncherHost.getWidth();
-                if (sLauncherHost.getHeight() > 0) surfH = sLauncherHost.getHeight();
             }
-            int pw = mPanelRoot.getWidth();
-            int ph = mPanelRoot.getHeight();
-            if (pw <= 0) pw = dp(mExtCtx, 338);
-            if (ph <= 0) ph = dp(mExtCtx, 320);
-
             int dockW = (mDockRoot != null && mDockRoot.getWidth() > 0) ? mDockRoot.getWidth() : dp(mExtCtx, 520);
             int dockH = (mDockRoot != null && mDockRoot.getHeight() > 0) ? mDockRoot.getHeight() : dp(mExtCtx, 46);
-            int dockBottomMargin = dp(mExtCtx, 10);
             int anchorRight = (mInLauncherHost && mDockRoot != null && mDockRoot.getWidth() > 0)
                     ? mDockRoot.getRight()
                     : ((surfW + dockW) / 2);
-            int anchorTop = (mInLauncherHost && mDockRoot != null && mDockRoot.getHeight() > 0)
-                    ? mDockRoot.getTop()
-                    : (surfH - dockBottomMargin - dockH);
-
-            int x = Math.min(surfW - pw - dp(mExtCtx, 14), Math.max(dp(mExtCtx, 14), anchorRight - pw));
-            int y = Math.max(dp(mExtCtx, 14), anchorTop - ph - dp(mExtCtx, 10));
+            int x = Math.max(dp(mExtCtx, 14), surfW - anchorRight) - mPanelRoot.getPaddingRight();
+            int y = dockH + dp(mExtCtx, 10);
             mPanelLp.x = x;
             mPanelLp.y = y;
             if (mInLauncherHost) {
                 ViewGroup.LayoutParams raw = mPanelRoot.getLayoutParams();
                 if (raw instanceof FrameLayout.LayoutParams) {
                     FrameLayout.LayoutParams flp = (FrameLayout.LayoutParams) raw;
-                    if (flp.leftMargin != x || flp.topMargin != y) {
-                        flp.gravity = Gravity.TOP | Gravity.LEFT;
-                        flp.leftMargin = x;
-                        flp.topMargin = y;
+                    if (flp.rightMargin != x || flp.bottomMargin != y) {
+                        flp.rightMargin = x;
+                        flp.bottomMargin = y;
                         mPanelRoot.setLayoutParams(flp);
                     }
                 }
@@ -1238,17 +1380,21 @@ public class BridgeService extends Service {
     }
 
     private void updateInputToggleUi(int inputToExt) {
-        if (mBtnToggle != null) {
-            mBtnToggle.setText(inputToExt == 1 ? "⇄ 外接" : "⇄ 平板");
-            GradientDrawable gd = (GradientDrawable) mBtnToggle.getBackground();
-            gd.setColor(inputToExt == 1 ? 0xCC2563EB : 0xCCEA580C);
-        }
         if (mTileInput != null) {
             mTileInput.setActive(inputToExt == 1, inputToExt == 1 ? "外接扩展屏" : "平板本机");
         }
     }
 
     private void updateTaskStrip(List<BridgeClient.TaskEntry> tasks) {
+        List<BridgeClient.TaskEntry> external = new ArrayList<>();
+        for (BridgeClient.TaskEntry task : tasks) if (task.onExt()) external.add(task);
+        if (mDesktopBar != null) {
+            mDesktopBar.runningTasks(external);
+            external = new ArrayList<>(external);
+            HashSet<String> pinnedTasks = new HashSet<>();
+            external.removeIf(task -> mDesktopBar.hasPin(task.pkg) && pinnedTasks.add(task.pkg));
+        }
+        tasks = external;
         if (mTaskStrip == null || mExtCtx == null) return;
         int surfW = mOverlayW;
         if (mInLauncherHost && sLauncherHost != null && sLauncherHost.getWidth() > 0) {
@@ -1270,9 +1416,6 @@ public class BridgeService extends Service {
         mLastTaskSig = s;
 
         mTaskStrip.removeAllViews();
-        if (mTaskDivider != null) {
-            mTaskDivider.setVisibility(limit > 0 ? View.VISIBLE : View.GONE);
-        }
 
         PackageManager pm = getPackageManager();
         for (int i = 0; i < limit; i++) {
@@ -1280,12 +1423,9 @@ public class BridgeService extends Service {
             Drawable icon = getCachedIcon(pm, t.pkg);
             String label = getCachedLabel(pm, t.pkg);
 
-            LinearLayout slot = new LinearLayout(mExtCtx);
-            slot.setOrientation(LinearLayout.VERTICAL);
-            slot.setGravity(Gravity.CENTER);
-            slot.setPadding(dp(mExtCtx, 6), dp(mExtCtx, 3), dp(mExtCtx, 6), dp(mExtCtx, 3));
+            FrameLayout slot = new FrameLayout(mExtCtx);
             GradientDrawable slotBg = new GradientDrawable();
-            slotBg.setCornerRadius(dp(mExtCtx, 10));
+            slotBg.setCornerRadius(dp(mExtCtx, 8));
             if (t.isTopExt()) {
                 slotBg.setColor(0x36FFFFFF);
             } else if (t.onExt()) {
@@ -1298,14 +1438,15 @@ public class BridgeService extends Service {
             ImageView iv = new ImageView(mExtCtx);
             iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
             if (icon != null) iv.setImageDrawable(icon);
-            LinearLayout.LayoutParams ivLp = new LinearLayout.LayoutParams(dp(mExtCtx, 28), dp(mExtCtx, 28));
+            FrameLayout.LayoutParams ivLp = new FrameLayout.LayoutParams(
+                    dp(mExtCtx, 28), dp(mExtCtx, 28), Gravity.CENTER);
             slot.addView(iv, ivLp);
 
             View dot = new View(mExtCtx);
             GradientDrawable dotBg = new GradientDrawable();
             dotBg.setCornerRadius(dp(mExtCtx, 2));
             if (t.isTopExt()) {
-                dotBg.setColor(0xFF38BDF8);
+                dotBg.setColor(0xFFC4DDFF);
             } else if (t.onExt()) {
                 dotBg.setColor(0xFF94A3B8);
             } else if (t.isRunning()) {
@@ -1314,9 +1455,10 @@ public class BridgeService extends Service {
                 dotBg.setColor(Color.TRANSPARENT);
             }
             dot.setBackground(dotBg);
-            LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(
-                    t.isTopExt() ? dp(mExtCtx, 14) : dp(mExtCtx, 6), dp(mExtCtx, 3));
-            dotLp.topMargin = dp(mExtCtx, 2);
+            FrameLayout.LayoutParams dotLp = new FrameLayout.LayoutParams(
+                    t.isTopExt() ? dp(mExtCtx, 14) : dp(mExtCtx, 6), dp(mExtCtx, 2),
+                    Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            dotLp.bottomMargin = dp(mExtCtx, 3);
             slot.addView(dot, dotLp);
 
             slot.setOnClickListener(v -> {
@@ -1326,27 +1468,43 @@ public class BridgeService extends Service {
                     mHandler.postDelayed(this::pollRemoteStateAsync, 250);
                 });
             });
-            slot.setOnLongClickListener(v -> {
-                if (t.taskId > 0) {
-                    mBg.execute(() -> {
-                        boolean ok = BridgeClient.removeTask(t.taskId);
-                        mHandler.post(() -> {
-                            Toast.makeText(BridgeService.this,
-                                    ok ? ("已关闭后台任务：" + label) : ("尝试切换：" + label), Toast.LENGTH_SHORT).show();
-                            pollRemoteStateAsync();
-                        });
-                    });
-                    return true;
+            slot.setContentDescription(label);
+            slot.setTooltipText(label);
+            slot.setFocusable(true);
+            slot.setOnLongClickListener(v -> { showTaskMenu(v, t, label); return true; });
+            slot.setOnGenericMotionListener((v, event) -> {
+                if (event.getActionMasked() == MotionEvent.ACTION_BUTTON_PRESS
+                        && event.getActionButton() == MotionEvent.BUTTON_SECONDARY) {
+                    showTaskMenu(v, t, label); return true;
                 }
                 return false;
             });
 
             LinearLayout.LayoutParams sLp = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                    dp(mExtCtx, 42), dp(mExtCtx, 42));
             sLp.leftMargin = dp(mExtCtx, 2);
             sLp.rightMargin = dp(mExtCtx, 2);
             mTaskStrip.addView(slot, sLp);
         }
+    }
+
+    private void showTaskMenu(View anchor, BridgeClient.TaskEntry task, String label) {
+        android.widget.PopupMenu menu = new android.widget.PopupMenu(mExtCtx, anchor);
+        menu.getMenu().add("切换到应用").setOnMenuItemClickListener(item -> {
+            mBg.execute(() -> BridgeClient.switchToTask(task.taskId, task.pkg));
+            return true;
+        });
+        menu.getMenu().add("关闭窗口").setOnMenuItemClickListener(item -> {
+            mBg.execute(() -> {
+                boolean ok = BridgeClient.removeTask(task.taskId);
+                mHandler.post(() -> {
+                    if (!ok) Toast.makeText(mExtCtx, "无法关闭：" + label, Toast.LENGTH_SHORT).show();
+                    pollRemoteStateAsync();
+                });
+            });
+            return true;
+        });
+        menu.show();
     }
 
     private void refreshLocalHardwareViews() {
@@ -1357,6 +1515,7 @@ public class BridgeService extends Service {
             if (mVolSeekBar.getMax() != max) mVolSeekBar.setMax(max);
             mVolSeekBar.setProgress(cur);
         }
+        if (mDesktopBar != null) mDesktopBar.status(mBattPct);
         if (mTrayBattView != null) mTrayBattView.setBattery(mBattPct, mBattCharging);
         if (mTrayBattPct != null) mTrayBattPct.setText(mBattPct + "%");
         if (mPanelBattView != null) mPanelBattView.setBattery(mBattPct, mBattCharging);
@@ -1401,6 +1560,15 @@ public class BridgeService extends Service {
         if (mTilePowerSave != null) {
             mTilePowerSave.setActive(mLastSys.powerSaveOn, "节能模式");
         }
+        if (showingConnections()) {
+            boolean enabled = mConnections.isWifi() ? mLastSys.wifiOn : mLastSys.btOn;
+            boolean wifiChanged = mConnections.isWifi() && !mPanelWifiSsid.equals(mLastSys.wifiSsid);
+            if (wifiChanged) {
+                mPanelWifiSsid = mLastSys.wifiSsid;
+                mConnections.onWifiNetworkChanged();
+            }
+            if (mConnections.updateSwitch(true, enabled) || wifiChanged) refreshConnections(false);
+        }
     }
 
     private void execSysAndRefresh(int act, int arg, String str) {
@@ -1417,14 +1585,15 @@ public class BridgeService extends Service {
 
     private void openExtSettings(String action) {
         setPanelOpen(false);
-        if (mUsingA11yOverlay) {
-            // Scheme B: accessibility overlay remains visible inside Settings on external display
-            mBg.execute(() -> BridgeClient.execSysAction(BridgeClient.SYS_OPEN_SETTINGS, -1, action));
-        } else {
-            // Scheme A fallback: open Settings on tablet Display 0 so external screen isn't trapped
-            Toast.makeText(this, "未开启无障碍：已在平板打开系统设置", Toast.LENGTH_SHORT).show();
-            mBg.execute(() -> BridgeClient.execSysAction(BridgeClient.SYS_OPEN_SETTINGS, 0, action));
-        }
+        int displayId = mUsingA11yOverlay || mLastStatus.hasPrivilegedBackend() ? mAttachedVdId : 0;
+        mBg.execute(() -> {
+            boolean opened = BridgeClient.execSysAction(BridgeClient.SYS_OPEN_SETTINGS, displayId, action);
+            if (!opened || displayId == 0) {
+                mHandler.post(() -> Toast.makeText(this,
+                        opened ? "系统设置已在平板打开" : "无法打开系统设置",
+                        Toast.LENGTH_SHORT).show());
+            }
+        });
     }
 
     private void openTabletMain() {
@@ -1504,6 +1673,9 @@ public class BridgeService extends Service {
     }
 
     private void detachExtOverlays() {
+        closeConnections();
+        if (mWindowChrome != null) mWindowChrome.destroy();
+        mWindowChrome = null;
         removeOverlayView(mDockRoot);
         removeOverlayView(mPanelRoot);
         removeOverlayView(mRestorePill);
@@ -1514,20 +1686,21 @@ public class BridgeService extends Service {
         mUsingA11yOverlay = false;
         mWinType = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
         mDockRoot = null;
+        mDesktopBar = null;
         mDockHidden = false;
         mRestorePill = null;
         mRestoreLp = null;
         mPanelRoot = null;
         mPanelCard = null;
+        mPanelOverview = null;
+        mConnections = null;
         mPanelOpen = false;
         mTrayPressed = false;
         mHandler.removeCallbacks(mOutsideDismissTask);
-        mBtnToggle = null;
         mBtnPanelFullscreen = null;
         mBtnPanelMirror = null;
         mBtnPanelHideDock = null;
         mTaskStrip = null;
-        mTaskDivider = null;
         mTrayBtn = null;
         mTrayWifiIcon = null;
         mTrayVolIcon = null;
@@ -1624,6 +1797,8 @@ public class BridgeService extends Service {
 
             LinearLayout leftWrap = new LinearLayout(ctx);
             leftWrap.setGravity(Gravity.CENTER);
+            leftWrap.setContentDescription("切换" + initialLabel);
+            leftWrap.setFocusable(true);
             leftWrap.setOnClickListener(v -> { if (onToggle != null) onToggle.run(); });
             icon = new MiniIconView(ctx, iconKind, Color.WHITE);
             leftWrap.addView(icon, new LinearLayout.LayoutParams(dp(ctx, 18), dp(ctx, 18)));
@@ -1640,6 +1815,8 @@ public class BridgeService extends Service {
                 arr.setTextColor(Color.WHITE);
                 arr.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f);
                 arr.setGravity(Gravity.CENTER);
+                arr.setContentDescription(initialLabel + "详情");
+                arr.setFocusable(true);
                 arr.setOnClickListener(v -> { if (onMore != null) onMore.run(); });
                 box.addView(arr, new LinearLayout.LayoutParams(dp(ctx, 32), LinearLayout.LayoutParams.MATCH_PARENT));
                 arrow = arr;
@@ -1668,8 +1845,8 @@ public class BridgeService extends Service {
             if (caption != null) label.setText(caption);
 
             GradientDrawable bg = new GradientDrawable();
-            bg.setColor(on ? 0xFFA6D8E8 : 0xFF2B3444);
-            bg.setCornerRadius(dp(ctx, 8));
+            bg.setColor(on ? 0xFFB8D6FF : 0xFF3C4A61);
+            bg.setCornerRadius(dp(ctx, 14));
             bg.setStroke(1, on ? 0x44FFFFFF : 0x1AFFFFFF);
             box.setBackground(bg);
 
@@ -1680,7 +1857,7 @@ public class BridgeService extends Service {
         }
     }
 
-    private static class MiniIconView extends View {
+    static class MiniIconView extends View {
         static final int KIND_WIFI = 1;
         static final int KIND_BT = 2;
         static final int KIND_VOLUME = 3;

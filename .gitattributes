@@ -1,0 +1,9 @@
+/helper/assets-root-tools/*.sh text eol=lf
+/helper/assets/autostart/*.sh text eol=lf
+/tools/xring-mode-unlock/external-refresh.sh text eol=lf
+/tools/xring-mode-unlock/manual-refresh.sh text eol=lf
+/tools/xring-mode-unlock/trace-dp-policy.sh text eol=lf
+/gradlew text eol=lf
+/build_linux.sh text eol=lf
+/tools/test-display.sh text eol=lf
+/tools/xring-mode-unlock/kernel618/lane_trial/vendor.symvers text eol=lf -whitespace

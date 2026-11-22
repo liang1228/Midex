@@ -2,8 +2,10 @@ package com.extbridge.helper;
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Parcel;
+import android.os.RemoteException;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -11,6 +13,41 @@ import java.util.List;
 import java.util.Map;
 
 public class BridgeClient {
+    public static class DesktopWindow {
+        public int displayId;
+        public int taskId;
+        public String pkg;
+        public android.graphics.Rect bounds;
+    }
+
+    public static DesktopWindow getDesktopWindow() {
+        IBinder binder = getService();
+        if (binder == null) return null;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            if (!binder.transact(43, data, reply, 0) || reply.readInt() != 1) return null;
+            DesktopWindow window = new DesktopWindow();
+            window.displayId = reply.readInt(); window.taskId = reply.readInt(); window.pkg = reply.readString();
+            window.bounds = new android.graphics.Rect(reply.readInt(), reply.readInt(), reply.readInt(), reply.readInt());
+            return window;
+        } catch (Throwable ignored) { return null; }
+        finally { data.recycle(); reply.recycle(); }
+    }
+
+    public static boolean controlWindow(int taskId, int action, android.graphics.Rect bounds) {
+        IBinder binder = getService();
+        if (binder == null) return false;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        android.graphics.Rect rect = bounds == null ? new android.graphics.Rect() : bounds;
+        try {
+            data.writeInt(taskId); data.writeInt(action);
+            data.writeInt(rect.left); data.writeInt(rect.top); data.writeInt(rect.right); data.writeInt(rect.bottom);
+            return binder.transact(42, data, reply, 0) && reply.readInt() == 1;
+        } catch (Throwable ignored) { return false; }
+        finally { data.recycle(); reply.recycle(); }
+    }
     public static final int SYS_WIFI = 1;
     public static final int SYS_BT = 2;
     public static final int SYS_AIRPLANE = 3;
@@ -44,10 +81,19 @@ public class BridgeClient {
         public int physW = 0;
         public int physH = 0;
         public float physFps = 60f;
+        public boolean physicalModeConfirmed;
+        public boolean drmReadback;
+        public int targetPhysW;
+        public int targetPhysH;
+        public float targetPhysFps;
+        public long configRequestId;
+        public long confirmedConfigRequestId;
+        public String configStage = "";
         public int virtW = 2560;
         public int virtH = 1440;
         public int virtDpi = 240;
         public float virtFps = 60f;
+        public float requestedFps = 0f;
         public int inputToExt = 1;
         public int cursorX = 1280;
         public int cursorY = 720;
@@ -55,9 +101,13 @@ public class BridgeClient {
         public String modesRaw = "";
         public String renderMode = "NONE";
         public int mirrorMode = 0;
-        public int fullscreenPolicy = 1;
+        public int fullscreenPolicy = 0;
         public String hostMode = "";
         public String daemonVersion = "";
+
+        public boolean hasPrivilegedBackend() {
+            return "root".equals(hostMode) || "system_server".equals(hostMode);
+        }
     }
 
     public static class RuntimeInfo {
@@ -72,6 +122,7 @@ public class BridgeClient {
 
     private static volatile IBinder sBinder;
     private static volatile Runnable sOnBinderReady;
+    private static final java.util.concurrent.atomic.AtomicBoolean sRequestPending = new java.util.concurrent.atomic.AtomicBoolean();
 
     public static void setOnBinderReady(Runnable r) {
         sOnBinderReady = r;
@@ -86,6 +137,15 @@ public class BridgeClient {
     }
 
     public static void requestBinder(android.content.Context ctx) {
+        // app_process has no registered ActivityThread receiver on some OEM builds.
+        // A credential-checked, blocking socket wakes the daemon only on an explicit UI request.
+        if (sRequestPending.compareAndSet(false, true)) new Thread(() -> {
+            try (android.net.LocalSocket socket = new android.net.LocalSocket()) {
+                socket.connect(new android.net.LocalSocketAddress("extbridge.daemon.singleton"));
+            } catch (java.io.IOException ignored) {
+                // Existing shell / older LSPosed backends still use the broadcasts below.
+            } finally { sRequestPending.set(false); }
+        }, "ExtBridge-binder-request").start();
         try {
             android.content.Intent i1 = new android.content.Intent("com.extbridge.daemon.NEED_BINDER");
             i1.setPackage("android");
@@ -142,6 +202,19 @@ public class BridgeClient {
                 if (reply.dataAvail() > 0) {
                     st.daemonVersion = reply.readString();
                 }
+                st.requestedFps = reply.dataAvail() > 0 ? reply.readInt() / 100f : st.virtFps;
+                if (reply.dataAvail() >= 16) {
+                    st.physicalModeConfirmed = reply.readInt() != 0;
+                    st.targetPhysW = reply.readInt();
+                    st.targetPhysH = reply.readInt();
+                    st.targetPhysFps = reply.readInt() / 100f;
+                }
+                if (reply.dataAvail() >= 20) {
+                    st.configRequestId = reply.readLong();
+                    st.confirmedConfigRequestId = reply.readLong();
+                    st.drmReadback = reply.readInt() != 0;
+                }
+                if (reply.dataAvail() > 0) st.configStage = reply.readString();
             }
         } catch (Throwable ignored) {
         } finally {
@@ -225,11 +298,31 @@ public class BridgeClient {
     public static void sendBack() { simpleOneWay(11); }
     public static void relaunchLauncher() { simpleOneWay(12); }
     public static void sendHome() { simpleOneWay(13); }
+    public static void prepareDesktop() { simpleOneWay(44); }
     public static void rebuild() { simpleOneWay(21); }
 
-    public static boolean applyConfig(int w, int h, int dpi, float fps, int physModeId) {
+    public static final long CONFIG_DISPLAY_CHANGED = -2;
+
+    public static String forceHighestExternalRefresh(int expectedExtId) {
+        IBinder service = getService();
+        if (service == null) return "NOT_CONNECTED";
+        Parcel request = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            request.writeInt(expectedExtId);
+            return service.transact(50, request, reply, 0) ? reply.readString() : "OLD_DAEMON";
+        } catch (RemoteException | RuntimeException e) {
+            return "NOT_CONNECTED";
+        } finally {
+            request.recycle();
+            reply.recycle();
+        }
+    }
+
+    /** Positive request ID, zero for a legacy daemon, or a negative error code. */
+    public static long applyConfig(int w, int h, int dpi, float fps, int physModeId, int expectedExtId) {
         IBinder b = getService();
-        if (b == null) return false;
+        if (b == null) return -1;
         Parcel d = Parcel.obtain();
         Parcel r = Parcel.obtain();
         try {
@@ -238,10 +331,15 @@ public class BridgeClient {
             d.writeInt(dpi);
             d.writeInt(Math.round(fps * 100f));
             d.writeInt(physModeId);
-            b.transact(16, d, r, 0);
-            return r.readInt() == 1;
+            d.writeInt(expectedExtId);
+            if (!b.transact(16, d, r, 0)) return -1;
+            if (r.readInt() != 1) {
+                return r.dataAvail() >= 8 && r.readLong() == CONFIG_DISPLAY_CHANGED
+                        ? CONFIG_DISPLAY_CHANGED : -1;
+            }
+            return r.dataAvail() >= 8 ? r.readLong() : 0;
         } catch (Throwable t) {
-            return false;
+            return -1;
         } finally {
             d.recycle();
             r.recycle();
@@ -470,6 +568,82 @@ public class BridgeClient {
         }
     }
 
+    static List<Bundle> connectionRows(boolean wifi, boolean scan) {
+        IBinder binder = getService();
+        if (binder == null) return null;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInt(wifi ? 1 : 0);
+            data.writeInt(scan ? 1 : 0);
+            return binder.transact(46, data, reply, 0) ? reply.createTypedArrayList(Bundle.CREATOR) : null;
+        } catch (RuntimeException | RemoteException ignored) {
+            return null;
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+    }
+
+    static boolean changeConnection(boolean wifi, boolean connect, String id) {
+        IBinder binder = getService();
+        if (binder == null) return false;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInt(wifi ? 1 : 0);
+            data.writeInt(connect ? 1 : 0);
+            data.writeString(id);
+            return binder.transact(47, data, reply, 0) && reply.readInt() == 1;
+        } catch (RuntimeException | RemoteException ignored) {
+            return false;
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+    }
+
+    static boolean joinWifi(String ssid, String security, String password) {
+        IBinder binder = getService();
+        if (binder == null) return false;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeString(ssid);
+            data.writeString(security);
+            data.writeString(password);
+            return binder.transact(48, data, reply, 0) && reply.readInt() == 1;
+        } catch (RuntimeException | RemoteException ignored) {
+            return false;
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+    }
+
+    static boolean answerBluetoothPairing(String address, boolean accept, String pin) {
+        IBinder binder = getService();
+        if (binder == null) return false;
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeString(address);
+            data.writeInt(accept ? 1 : 0);
+            data.writeString(pin);
+            if (!binder.transact(49, data, reply, 0)) {
+                android.util.Log.w("ExtBridge", "Bluetooth pairing reply RPC unsupported");
+                return false;
+            }
+            return reply.readInt() == 1;
+        } catch (RuntimeException | RemoteException failure) {
+            android.util.Log.w("ExtBridge", "Bluetooth pairing reply RPC failed", failure);
+            return false;
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+    }
+
     public static int setMirrorMode(int mode) {
         IBinder b = getService();
         if (b == null) return -1;
@@ -522,7 +696,7 @@ public class BridgeClient {
             case APP_MODE_LAND_FULL: return "强制横屏全屏";
             case APP_MODE_PORT_COMPAT: return "竖屏居中兼容";
             case APP_MODE_FREEFORM: return "自由小窗模式";
-            default: return "跟随系统默认";
+            default: return "桌面默认窗口";
         }
     }
 

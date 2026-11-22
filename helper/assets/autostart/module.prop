@@ -1,0 +1,6 @@
+id=extbridge_autostart
+name=ExtBridge Plug and Play
+version=4.7.0
+versionCode=14
+author=ExtBridge
+description=Event-driven external desktop startup. No helper foreground service or periodic polling while unplugged.

@@ -1,0 +1,2 @@
+0x857d345b	tcpc_dev_get_by_name	external_tcpc	EXPORT_SYMBOL	
+0x483a2bd2	tcpm_dpm_dp_status_update	external_tcpc	EXPORT_SYMBOL	

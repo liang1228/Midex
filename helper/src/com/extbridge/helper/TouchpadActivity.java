@@ -1,49 +1,23 @@
 package com.extbridge.helper;
 
-import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.res.Configuration;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.Paint;
-import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.text.TextUtils;
-import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewGroup;
-import android.view.inputmethod.EditorInfo;
-import android.view.inputmethod.InputMethodManager;
-import android.widget.EditText;
-import android.widget.HorizontalScrollView;
-import android.widget.LinearLayout;
-import android.widget.TextView;
-import android.widget.Toast;
 
-public class TouchpadActivity extends Activity {
-    private static final float[] SPEEDS = {1.0f, 1.6f, 2.3f, 3.2f};
-    private int mSpeedIdx = 1;
-    private boolean mUseCtrlV = false;
-    private boolean mOneHandPortrait = false;
+import androidx.activity.ComponentActivity;
 
-    private TextView mTvCoord;
-    private TextView mTvHint;
-    private TextView mBtnInputMode;
-    private TextView mBtnSpeed;
-    private TextView mBtnReach;
-    private TextView mBtnDragLock;
-    private TextView mBtnPasteMode;
-    private LinearLayout mReachSpacer;
-    private LinearLayout mImeDock;
-    private EditText mImeInput;
-    private boolean mImeVisible = false;
-    private boolean mDragLocked = false;
+public class TouchpadActivity extends ComponentActivity {
+    private WindowRefreshRate mRefreshRate;
+    private final TouchpadUi mUi = new TouchpadUi();
 
     private int dp(int v) {
         return Math.max(1, Math.round(v * getResources().getDisplayMetrics().density));
@@ -53,23 +27,15 @@ public class TouchpadActivity extends Activity {
         return v * getResources().getDisplayMetrics().density;
     }
 
-    private boolean isPortrait() {
-        return getResources().getConfiguration().orientation == Configuration.ORIENTATION_PORTRAIT;
-    }
-
     private final Handler mHandler = new Handler(Looper.getMainLooper());
-    private int mVirtW = 2560;
-    private int mVirtH = 1440;
-    private int mCurX = 1280;
-    private int mCurY = 720;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        mRefreshRate = new WindowRefreshRate(this);
         if (ensureOnDisplay0()) return;
         BridgeService.ensureStarted(this);
-        buildUi();
-        refreshStatus();
+        mUi.show(this);
     }
 
     private boolean ensureOnDisplay0() {
@@ -90,6 +56,7 @@ public class TouchpadActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        mRefreshRate.start();
         BridgeClient.setOnBinderReady(() -> mHandler.post(this::refreshStatus));
         if (BridgeClient.getService() == null) BridgeClient.requestBinder(this);
         refreshStatus();
@@ -97,313 +64,28 @@ public class TouchpadActivity extends Activity {
 
     @Override
     protected void onPause() {
+        if (mUi.getDragLocked()) toggleDragLock();
         super.onPause();
+        mRefreshRate.stop();
         BridgeClient.setOnBinderReady(null);
     }
 
     @Override
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
-        updateOrientationLayout();
-    }
-
-    private void updateOrientationLayout() {
-        boolean port = isPortrait();
-        if (mBtnReach != null) {
-            mBtnReach.setVisibility(port ? View.VISIBLE : View.GONE);
-        }
-        if (mReachSpacer != null) {
-            mReachSpacer.setVisibility((port && mOneHandPortrait) ? View.VISIBLE : View.GONE);
-        }
-        if (mTvHint != null) {
-            mTvHint.setText(port
-                    ? "全区域滑动 · 右边缘单指滚轮 · 轻触左键 · 双指右键"
-                    : "单指移动 | 轻触左键 | 双指点右键 | 双指或右边缘滑滚轮");
-        }
+        mRefreshRate.apply();
     }
 
     private void refreshStatus() {
-        BridgeClient.Status st = BridgeClient.getStatus();
-        if (st.connected) {
-            mVirtW = st.virtW;
-            mVirtH = st.virtH;
-            mCurX = st.cursorX;
-            mCurY = st.cursorY;
-            updateCoordLabel();
-            if (mBtnInputMode != null) {
-                mBtnInputMode.setText(st.inputToExt == 1 ? "⇄ 扩展屏" : "⇄ 本机");
-            }
-        }
+        mUi.updateStatus(BridgeClient.getStatus());
     }
 
-    private void updateCoordLabel() {
-        if (mTvCoord != null) {
-            mTvCoord.setText("光标 (" + mCurX + ", " + mCurY + ") · " + mVirtW + "×" + mVirtH);
-        }
+    void toggleDragLock() {
+        boolean lock = !mUi.getDragLocked();
+        if (sendMouseSync(lock ? 3 : 4, 0f, 0f)) mUi.setDragLocked(lock);
     }
 
-    private void buildUi() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(0xFF0A0F1A);
-        if (android.os.Build.VERSION.SDK_INT >= 30) {
-            root.setOnApplyWindowInsetsListener((v, insets) -> {
-                android.graphics.Insets sys = insets.getInsets(
-                        android.view.WindowInsets.Type.systemBars()
-                                | android.view.WindowInsets.Type.displayCutout()
-                                | android.view.WindowInsets.Type.ime());
-                v.setPadding(sys.left, sys.top, sys.right, sys.bottom);
-                return insets;
-            });
-        }
-
-        // 1. Top status header (two clean compact rows so portrait phones never crush coordinates/exit)
-        LinearLayout topWrap = new LinearLayout(this);
-        topWrap.setOrientation(LinearLayout.VERTICAL);
-        topWrap.setPadding(dp(12), dp(8), dp(12), dp(6));
-        topWrap.setBackgroundColor(0xFF111827);
-
-        LinearLayout top = new LinearLayout(this);
-        top.setOrientation(LinearLayout.HORIZONTAL);
-        top.setGravity(Gravity.CENTER_VERTICAL);
-
-        TextView title = new TextView(this);
-        title.setText("ExtBridge 触摸板");
-        title.setTextColor(Color.WHITE);
-        title.setTextSize(15f);
-        title.setSingleLine(true);
-        title.getPaint().setFakeBoldText(true);
-        top.addView(title);
-
-        mTvCoord = new TextView(this);
-        mTvCoord.setTextColor(0xFF38BDF8);
-        mTvCoord.setTextSize(12.5f);
-        mTvCoord.setSingleLine(true);
-        mTvCoord.setEllipsize(TextUtils.TruncateAt.END);
-        mTvCoord.setPadding(dp(10), 0, dp(8), 0);
-        top.addView(mTvCoord, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        TextView btnExit = makeBtn("✕ 退出", 0xFF334155);
-        btnExit.setOnClickListener(v -> finish());
-        top.addView(btnExit);
-        topWrap.addView(top);
-
-        mTvHint = new TextView(this);
-        mTvHint.setTextColor(0xFF94A3B8);
-        mTvHint.setTextSize(11.5f);
-        mTvHint.setSingleLine(true);
-        mTvHint.setEllipsize(TextUtils.TruncateAt.END);
-        mTvHint.setPadding(0, dp(3), 0, 0);
-        topWrap.addView(mTvHint);
-        root.addView(topWrap);
-
-        // Optional ergonomic upper shelf for one-handed portrait thumb reach
-        mReachSpacer = new LinearLayout(this);
-        mReachSpacer.setOrientation(LinearLayout.VERTICAL);
-        mReachSpacer.setGravity(Gravity.CENTER);
-        mReachSpacer.setPadding(dp(14), dp(10), dp(14), dp(6));
-        TextView reachInfo = new TextView(this);
-        reachInfo.setText("单手握持模式：触控板与左右键已下移至拇指热区\n点击下方「☝ 单手」按钮可切回全屏大触控板");
-        reachInfo.setTextColor(0xFF64748B);
-        reachInfo.setTextSize(12f);
-        reachInfo.setGravity(Gravity.CENTER);
-        mReachSpacer.addView(reachInfo);
-        root.addView(mReachSpacer, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.72f));
-
-        // 2. Main Huge Touchpad Canvas
-        TouchpadView pad = new TouchpadView(this);
-        LinearLayout.LayoutParams padLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-        padLp.setMargins(dp(10), dp(8), dp(10), dp(6));
-        root.addView(pad, padLp);
-
-        // 3. Physical Trackpad Left/Right Buttons Bar
-        LinearLayout clickBar = new LinearLayout(this);
-        clickBar.setOrientation(LinearLayout.HORIZONTAL);
-        clickBar.setPadding(dp(10), 0, dp(10), dp(6));
-
-        TextView btnLeft = makeBigPadBtn("左键点击", 0xFF1E293B);
-        btnLeft.setOnClickListener(v -> sendMouseSync(1, 0f, 0f));
-
-        mBtnDragLock = makeBigPadBtn("拖拽: 关", 0xFF1E293B);
-        mBtnDragLock.setOnClickListener(v -> toggleDragLock());
-
-        TextView btnRight = makeBigPadBtn("右键 / 返回", 0xFF1E293B);
-        btnRight.setOnClickListener(v -> sendMouseSync(2, 0f, 0f));
-
-        int clickH = dp(44);
-        clickBar.addView(btnLeft, new LinearLayout.LayoutParams(0, clickH, 2f));
-        LinearLayout.LayoutParams dLp = new LinearLayout.LayoutParams(0, clickH, 1.25f);
-        dLp.setMargins(dp(6), 0, dp(6), 0);
-        clickBar.addView(mBtnDragLock, dLp);
-        clickBar.addView(btnRight, new LinearLayout.LayoutParams(0, clickH, 2f));
-        root.addView(clickBar);
-
-        // 4. Bottom Action Strip (horizontally scrollable on narrow portrait phones)
-        HorizontalScrollView barScroll = new HorizontalScrollView(this);
-        barScroll.setHorizontalScrollBarEnabled(false);
-        barScroll.setFillViewport(true);
-        barScroll.setBackgroundColor(0xFF111827);
-
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(10), dp(6), dp(10), dp(8));
-
-        TextView btnExtBack = makeBtn("← 返回", 0xFF1E293B);
-        btnExtBack.setOnClickListener(v -> BridgeClient.sendBack());
-
-        TextView btnExtHome = makeBtn("⊞ 桌面", 0xFF1E293B);
-        btnExtHome.setOnClickListener(v -> BridgeClient.relaunchLauncher());
-
-        mBtnInputMode = makeBtn("⇄ 扩展屏", 0xFF1E40AF);
-        mBtnInputMode.setOnClickListener(v -> {
-            int m = BridgeClient.toggleInput();
-            mBtnInputMode.setText(m == 1 ? "⇄ 扩展屏" : "⇄ 本机");
-            BridgeService.refreshFromReceiver(this);
-        });
-
-        mBtnSpeed = makeBtn("速度 " + SPEEDS[mSpeedIdx] + "x", 0xFF334155);
-        mBtnSpeed.setOnClickListener(v -> {
-            mSpeedIdx = (mSpeedIdx + 1) % SPEEDS.length;
-            mBtnSpeed.setText("速度 " + SPEEDS[mSpeedIdx] + "x");
-        });
-
-        mBtnReach = makeBtn("☝ 全屏", 0xFF334155);
-        mBtnReach.setOnClickListener(v -> {
-            mOneHandPortrait = !mOneHandPortrait;
-            mBtnReach.setText(mOneHandPortrait ? "☝ 单手" : "☝ 全屏");
-            ((GradientDrawable) mBtnReach.getBackground()).setColor(mOneHandPortrait ? 0xFF0369A1 : 0xFF334155);
-            updateOrientationLayout();
-        });
-
-        TextView btnIme = makeBtn("⌨ 键盘", 0xFF0284C7);
-        btnIme.setOnClickListener(v -> toggleImeDock(!mImeVisible));
-
-        bar.addView(btnExtBack);
-        bar.addView(btnExtHome);
-        bar.addView(mBtnInputMode);
-        bar.addView(mBtnSpeed);
-        bar.addView(mBtnReach);
-        View spacer = new View(this);
-        bar.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1f));
-        bar.addView(btnIme);
-        barScroll.addView(bar, new ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        root.addView(barScroll);
-
-        // 5. Collapsible IME & Special Keys Dock
-        mImeDock = new LinearLayout(this);
-        mImeDock.setOrientation(LinearLayout.VERTICAL);
-        mImeDock.setBackgroundColor(0xFF172033);
-        mImeDock.setPadding(16, 10, 16, 14);
-        mImeDock.setVisibility(View.GONE);
-
-        HorizontalScrollView keysScroll = new HorizontalScrollView(this);
-        LinearLayout keysRow = new LinearLayout(this);
-        keysRow.setOrientation(LinearLayout.HORIZONTAL);
-        addKeyChip(keysRow, "回车 Enter", KeyEvent.KEYCODE_ENTER, 0);
-        addKeyChip(keysRow, "退格 ⌫", KeyEvent.KEYCODE_DEL, 0);
-        addKeyChip(keysRow, "空格 Space", KeyEvent.KEYCODE_SPACE, 0);
-        addKeyChip(keysRow, "Esc", KeyEvent.KEYCODE_ESCAPE, 0);
-        addKeyChip(keysRow, "Tab", KeyEvent.KEYCODE_TAB, 0);
-        addKeyChip(keysRow, "全选 Ctrl+A", KeyEvent.KEYCODE_A, KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON);
-        addKeyChip(keysRow, "复制 Ctrl+C", KeyEvent.KEYCODE_C, KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON);
-        addKeyChip(keysRow, "粘贴 Ctrl+V", KeyEvent.KEYCODE_V, KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON);
-        addKeyChip(keysRow, "↑", KeyEvent.KEYCODE_DPAD_UP, 0);
-        addKeyChip(keysRow, "↓", KeyEvent.KEYCODE_DPAD_DOWN, 0);
-        addKeyChip(keysRow, "←", KeyEvent.KEYCODE_DPAD_LEFT, 0);
-        addKeyChip(keysRow, "→", KeyEvent.KEYCODE_DPAD_RIGHT, 0);
-        addKeyChip(keysRow, "主页", KeyEvent.KEYCODE_HOME, 0);
-        keysScroll.addView(keysRow);
-        mImeDock.addView(keysScroll, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        LinearLayout inputRow = new LinearLayout(this);
-        inputRow.setOrientation(LinearLayout.HORIZONTAL);
-        inputRow.setGravity(Gravity.CENTER_VERTICAL);
-        inputRow.setPadding(0, 10, 0, 0);
-
-        mImeInput = new EditText(this);
-        mImeInput.setHint("在此调用平板输入法输入中文/英文，按发送直达扩展屏输入框...");
-        mImeInput.setHintTextColor(0xFF64748B);
-        mImeInput.setTextColor(Color.WHITE);
-        mImeInput.setTextSize(15f);
-        mImeInput.setSingleLine(true);
-        mImeInput.setImeOptions(EditorInfo.IME_ACTION_SEND | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
-        mImeInput.setPadding(18, 12, 18, 12);
-        GradientDrawable edBg = new GradientDrawable();
-        edBg.setColor(0xFF0F172A);
-        edBg.setCornerRadius(12f);
-        edBg.setStroke(1, 0xFF38BDF8);
-        mImeInput.setBackground(edBg);
-        mImeInput.setOnEditorActionListener((v, actionId, event) -> {
-            if (actionId == EditorInfo.IME_ACTION_SEND || actionId == EditorInfo.IME_ACTION_DONE) {
-                commitImeText();
-                return true;
-            }
-            return false;
-        });
-
-        TextView btnSend = makeBtn("发送上屏", 0xFF2563EB);
-        btnSend.setOnClickListener(v -> commitImeText());
-
-        mBtnPasteMode = makeBtn("中文方式:PASTE", 0xFF334155);
-        mBtnPasteMode.setOnClickListener(v -> {
-            mUseCtrlV = !mUseCtrlV;
-            mBtnPasteMode.setText(mUseCtrlV ? "中文方式:Ctrl+V" : "中文方式:PASTE");
-        });
-
-        TextView btnHideIme = makeBtn("收起", 0xFF475569);
-        btnHideIme.setOnClickListener(v -> toggleImeDock(false));
-
-        inputRow.addView(mImeInput, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        inputRow.addView(btnSend);
-        inputRow.addView(mBtnPasteMode);
-        inputRow.addView(btnHideIme);
-        mImeDock.addView(inputRow);
-        root.addView(mImeDock);
-
-        setContentView(root);
-        updateOrientationLayout();
-    }
-
-    private void addKeyChip(LinearLayout parent, String label, int keyCode, int meta) {
-        TextView tv = makeBtn(label, 0xFF26334A);
-        tv.setOnClickListener(v -> BridgeClient.sendKey(keyCode, meta));
-        parent.addView(tv);
-    }
-
-    private void toggleDragLock() {
-        mDragLocked = !mDragLocked;
-        if (mDragLocked) {
-            sendMouseSync(3, 0f, 0f);
-            mBtnDragLock.setText("拖拽锁定: 开");
-            ((GradientDrawable) mBtnDragLock.getBackground()).setColor(0xFFEA580C);
-        } else {
-            sendMouseSync(4, 0f, 0f);
-            mBtnDragLock.setText("拖拽锁定: 关");
-            ((GradientDrawable) mBtnDragLock.getBackground()).setColor(0xFF1E293B);
-        }
-    }
-
-    private void toggleImeDock(boolean show) {
-        mImeVisible = show;
-        mImeDock.setVisibility(show ? View.VISIBLE : View.GONE);
-        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-        if (show) {
-            mImeInput.requestFocus();
-            mHandler.postDelayed(() -> {
-                if (imm != null) imm.showSoftInput(mImeInput, InputMethodManager.SHOW_IMPLICIT);
-            }, 80);
-        } else if (imm != null) {
-            imm.hideSoftInputFromWindow(mImeInput.getWindowToken(), 0);
-        }
-    }
-
-    private void commitImeText() {
-        String txt = mImeInput.getText().toString();
+    void commitImeText(String txt, boolean useCtrlV) {
         if (txt.isEmpty()) {
             BridgeClient.sendKey(KeyEvent.KEYCODE_ENTER, 0);
             return;
@@ -423,55 +105,19 @@ public class TouchpadActivity extends Activity {
             if (cm != null) {
                 cm.setPrimaryClip(ClipData.newPlainText("extbridge", txt));
             }
-            mHandler.postDelayed(() -> BridgeClient.sendPaste(mUseCtrlV), 35);
+            mHandler.postDelayed(() -> BridgeClient.sendPaste(useCtrlV), 35);
         }
-        mImeInput.setText("");
     }
 
-    private void sendMouseSync(int type, float a1, float a2) {
+    boolean sendMouseSync(int type, float a1, float a2) {
         int[] xy = BridgeClient.sendMouse(type, a1, a2);
-        if (xy != null && xy.length >= 2) {
-            mCurX = xy[0];
-            mCurY = xy[1];
-            BridgeService.moveCursor(mCurX, mCurY, mDragLocked || type == 3);
-            updateCoordLabel();
-        }
+        if (xy == null || xy.length < 2) return false;
+        BridgeService.moveCursor(xy[0], xy[1], type == 3 || (mUi.getDragLocked() && type != 4));
+        mUi.updateCursor(xy[0], xy[1]);
+        return true;
     }
 
-    private TextView makeBtn(String txt, int color) {
-        TextView tv = new TextView(this);
-        tv.setText(txt);
-        tv.setTextColor(Color.WHITE);
-        tv.setTextSize(12f);
-        tv.setSingleLine(true);
-        tv.setPadding(dp(9), dp(6), dp(9), dp(6));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(color);
-        bg.setCornerRadius(dpF(9));
-        tv.setBackground(bg);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.setMargins(dp(2), 0, dp(2), 0);
-        tv.setLayoutParams(lp);
-        return tv;
-    }
-
-    private TextView makeBigPadBtn(String txt, int color) {
-        TextView tv = new TextView(this);
-        tv.setText(txt);
-        tv.setTextColor(0xFFE2E8F0);
-        tv.setTextSize(13.5f);
-        tv.setSingleLine(true);
-        tv.setGravity(Gravity.CENTER);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(color);
-        bg.setCornerRadius(dpF(10));
-        bg.setStroke(1, 0x3394A3B8);
-        tv.setBackground(bg);
-        return tv;
-    }
-
-    private class TouchpadView extends View {
+    class TouchpadView extends View {
         private final Paint mDotPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint mRingPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint mRailPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -490,20 +136,18 @@ public class TouchpadActivity extends Activity {
 
         TouchpadView(Context ctx) {
             super(ctx);
-            GradientDrawable bg = new GradientDrawable();
-            bg.setColor(0xFF0F172A);
-            bg.setCornerRadius(dpF(14));
-            bg.setStroke(Math.max(1, dp(1)), 0x3338BDF8);
-            setBackground(bg);
-
-            mDotPaint.setColor(0x2838BDF8);
-            mRingPaint.setColor(0xAA38BDF8);
+            setContentDescription("手势区");
             mRingPaint.setStyle(Paint.Style.STROKE);
             mRingPaint.setStrokeWidth(dpF(1.6f));
-
-            mRailPaint.setColor(0x1438BDF8);
-            mRailTickPaint.setColor(0x4538BDF8);
             mRailTickPaint.setStrokeWidth(dpF(1.2f));
+        }
+
+        void setPalette(int dot, int ring, int rail, int tick) {
+            mDotPaint.setColor(dot);
+            mRingPaint.setColor(ring);
+            mRailPaint.setColor(rail);
+            mRailTickPaint.setColor(tick);
+            invalidate();
         }
 
         @Override
@@ -519,7 +163,8 @@ public class TouchpadActivity extends Activity {
             }
             // Subtle right-edge single-finger scroll strip
             int railLeft = Math.max(0, w - railW);
-            canvas.drawRect(railLeft, dpF(10), w - dpF(2), h - dpF(10), mRailPaint);
+            canvas.drawRoundRect(railLeft, dpF(10), w - dpF(4), h - dpF(10),
+                    dpF(12), dpF(12), mRailPaint);
             for (int y = dp(24); y < h - dp(24); y += dp(16)) {
                 canvas.drawLine(railLeft + dpF(7), y, w - dpF(7), y, mRailTickPaint);
             }
@@ -553,7 +198,7 @@ public class TouchpadActivity extends Activity {
                     mScrollAccumH = 0f;
                     mTouchVisX = mDownX;
                     mTouchVisY = mDownY;
-                    if (!mDragLocked && (now - mLastTapUpTime) < 240) {
+                    if (!mUi.getDragLocked() && (now - mLastTapUpTime) < 240) {
                         mMode = 3; // double tap drag
                         sendMouseSync(3, 0f, 0f);
                     } else if (mDownX >= getWidth() - railW && getWidth() > railW * 3f) {
@@ -590,9 +235,9 @@ public class TouchpadActivity extends Activity {
                         if (dist > distFloor) {
                             // Normalize sensitivity across high-DPI portrait phones and wide tablets
                             float padW = Math.max(320f, getWidth() - railW);
-                            float portraitGain = Math.max(1.0f, Math.min(2.1f, (mVirtW / padW) * 0.65f));
+                            float portraitGain = Math.max(1.0f, Math.min(2.1f, (mUi.getDesktopWidth() / padW) * 0.65f));
                             float dpiNorm = 2.0f / Math.max(1.0f, getResources().getDisplayMetrics().density);
-                            float accel = SPEEDS[mSpeedIdx] * dpiNorm * portraitGain
+                            float accel = mUi.getSpeed() * dpiNorm * portraitGain
                                     * (1.0f + Math.min(dist, accelCap) * (0.045f / Math.max(1f, getResources().getDisplayMetrics().density)));
                             sendMouseSync(0, dx * accel, dy * accel);
                         }

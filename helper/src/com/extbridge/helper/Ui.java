@@ -2,6 +2,7 @@ package com.extbridge.helper;
 
 import android.content.Context;
 import android.content.res.ColorStateList;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -15,23 +16,33 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 /**
- * 轻量 Material 3 / KernelSU 风格组件库（不引入 AndroidX）。
- * 统一深色、圆角、分组卡片与液态玻璃质感。
+ * Native components following the Miuix visual hierarchy.
  */
 public final class Ui {
-    public static final int BG = 0xFF040507;
-    public static final int TEXT = 0xFFF5F5F7;
-    public static final int TEXT2 = 0xFFA1A1AA;
-    public static final int TEXT3 = 0xFF71717A;
-    public static final int ACCENT = 0xFF7DB2FF;
-    public static final int ACCENT_STRONG = 0xFF3B82F6;
-    public static final int GREEN = 0xFF4ADE80;
-    public static final int AMBER = 0xFFFBBF24;
-    public static final int RED = 0xFFF87171;
-    public static final int PURPLE = 0xFFC4B5FD;
-    public static final int TEAL = 0xFF5EEAD4;
+    public static boolean dark;
+    public static int BG, SURFACE, SURFACE_ALT, TEXT, TEXT2, TEXT3, OUTLINE;
+    public static int ACCENT, ACCENT_STRONG, GREEN, AMBER, RED, PURPLE, TEAL;
 
     private Ui() {}
+
+    public static void configure(Context c) {
+        dark = (c.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
+                == Configuration.UI_MODE_NIGHT_YES;
+        BG = dark ? 0xFF101010 : 0xFFF7F7F7;
+        SURFACE = dark ? 0xFF1F1F1F : 0xFFFFFFFF;
+        SURFACE_ALT = dark ? 0xFF2B2B2B : 0xFFF0F0F0;
+        TEXT = dark ? 0xFFF4F4F4 : 0xFF171717;
+        TEXT2 = dark ? 0xFFB2B2B2 : 0xFF575757;
+        TEXT3 = dark ? 0xFF9B9B9B : 0xFF6B6B6B;
+        OUTLINE = dark ? 0x20FFFFFF : 0x14000000;
+        ACCENT = dark ? 0xFF8AB4FF : 0xFF2864D7;
+        ACCENT_STRONG = 0xFF3482FF;
+        GREEN = dark ? 0xFF83DB9C : 0xFF226A37;
+        AMBER = dark ? 0xFFECC071 : 0xFF805400;
+        RED = dark ? 0xFFFFA6A6 : 0xFFB32632;
+        PURPLE = dark ? 0xFFD1B4EE : 0xFF714199;
+        TEAL = dark ? 0xFF87D6C1 : 0xFF216C5B;
+    }
 
     public static float dp(Context c, float v) {
         return TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, c.getResources().getDisplayMetrics());
@@ -64,9 +75,8 @@ public final class Ui {
     }
 
     public static TextView section(Context c, String s) {
-        TextView tv = medium(c, s, 12f, ACCENT);
-        tv.setLetterSpacing(0.06f);
-        tv.setPadding(dpi(c, 4), dpi(c, 4), dpi(c, 4), dpi(c, 8));
+        TextView tv = medium(c, s, 13f, TEXT3);
+        tv.setPadding(dpi(c, 16), dpi(c, 12), dpi(c, 16), dpi(c, 8));
         return tv;
     }
 
@@ -80,20 +90,20 @@ public final class Ui {
         return iv;
     }
 
-    /** 玻璃卡片。 */
+    /** Grouped surface; glass is reserved for the navigation bar. */
     public static LinearLayout card(Context c) {
         LinearLayout card = new LinearLayout(c);
         card.setOrientation(LinearLayout.VERTICAL);
-        int p = dpi(c, 16);
-        card.setPadding(p, dpi(c, 12), p, dpi(c, 12));
+        int p = dpi(c, 20);
+        card.setPadding(p, dpi(c, 16), p, dpi(c, 16));
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xFF141416);
-        bg.setCornerRadius(dp(c, 24));
+        bg.setColor(SURFACE);
+        bg.setCornerRadius(dp(c, 20));
         card.setBackground(bg);
         card.setElevation(0);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dpi(c, 10);
+        lp.bottomMargin = dpi(c, 12);
         card.setLayoutParams(lp);
         return card;
     }
@@ -149,7 +159,7 @@ public final class Ui {
 
     public static void divider(Context c, LinearLayout parent) {
         View v = new View(c);
-        v.setBackgroundColor(0x12FFFFFF);
+        v.setBackgroundColor(OUTLINE);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dpi(c, 0.8f)));
         lp.leftMargin = dpi(c, 40);
@@ -161,33 +171,32 @@ public final class Ui {
         tv.setGravity(Gravity.CENTER);
         tv.setPadding(dpi(c, 10), dpi(c, 5), dpi(c, 10), dpi(c, 5));
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(withAlpha(color, 0x24));
+        bg.setColor(withAlpha(color, dark ? 0x24 : 0x14));
         bg.setCornerRadius(dp(c, 100));
-        bg.setStroke(Math.max(1, dpi(c, 0.8f)), withAlpha(color, 0x4D));
         tv.setBackground(bg);
         return tv;
     }
 
     public static TextView primaryButton(Context c, String text) {
-        return button(c, text, ACCENT, 0xFF071018, 0x00FFFFFF);
+        return button(c, text, ACCENT_STRONG, Color.WHITE, 0);
     }
 
     public static TextView tonalButton(Context c, String text) {
-        return button(c, text, 0x1AFFFFFF, 0xFFF4F4F5, 0x24FFFFFF);
+        return button(c, text, SURFACE_ALT, TEXT, 0);
     }
 
     public static TextView ghostButton(Context c, String text) {
-        return button(c, text, 0x00000000, 0xFFA1A1AA, 0x00FFFFFF);
+        return button(c, text, Color.TRANSPARENT, TEXT2, 0);
     }
 
     public static TextView button(Context c, String s, int bgColor, int textColor, int strokeColor) {
         TextView tv = medium(c, s, 13.5f, textColor);
         tv.setGravity(Gravity.CENTER);
         tv.setPadding(dpi(c, 18), dpi(c, 10), dpi(c, 18), dpi(c, 10));
-        tv.setMinHeight(dpi(c, 44));
+        tv.setMinHeight(dpi(c, 48));
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(bgColor);
-        bg.setCornerRadius(dp(c, 100));
+        bg.setCornerRadius(dp(c, 14));
         if ((strokeColor >>> 24) != 0) bg.setStroke(Math.max(1, dpi(c, 0.8f)), strokeColor);
         RippleDrawable ripple = new RippleDrawable(
                 ColorStateList.valueOf(0x33FFFFFF), bg, null);
